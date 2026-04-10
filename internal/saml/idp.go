@@ -109,8 +109,8 @@ func (i *IdP) GetRelayState(r *http.Request) string {
 	return r.URL.Query().Get("RelayState")
 }
 
-// CreateResponse creates a SAML Response for the given user claims
-func (i *IdP) CreateResponse(requestID, nameID string, attributes map[string]string) (*saml.Response, error) {
+// CreateResponse creates a SAML Response for the given user claims and returns signed XML
+func (i *IdP) CreateResponse(requestID, nameID string, attributes map[string]string) ([]byte, error) {
 	now := time.Now()
 
 	// Create assertion
@@ -186,7 +186,13 @@ func (i *IdP) CreateResponse(requestID, nameID string, attributes map[string]str
 		}
 	}
 
-	// Create response
+	// Sign the assertion - returns signed XML element
+	signedAssertionElement, err := i.signAssertion(&assertion)
+	if err != nil {
+		return nil, fmt.Errorf("failed to sign assertion: %w", err)
+	}
+
+	// Create response structure
 	response := &saml.Response{
 		ID:           fmt.Sprintf("id-%d", now.UnixNano()),
 		InResponseTo: requestID,
@@ -204,14 +210,36 @@ func (i *IdP) CreateResponse(requestID, nameID string, attributes map[string]str
 		},
 	}
 
-	// Sign the assertion
-	signedAssertion, err := i.signAssertion(&assertion)
+	// Marshal response to XML (without assertion)
+	responseXML, err := xml.Marshal(response)
 	if err != nil {
-		return nil, fmt.Errorf("failed to sign assertion: %w", err)
+		return nil, fmt.Errorf("failed to marshal response: %w", err)
 	}
 
-	// Add signed assertion to response
-	response.Assertion = signedAssertion
+	// Parse response XML into etree
+	responseDoc := etree.NewDocument()
+	if err := responseDoc.ReadFromBytes(responseXML); err != nil {
+		return nil, fmt.Errorf("failed to parse response XML: %w", err)
+	}
+
+	// Add signed assertion element to response
+	responseDoc.Root().AddChild(signedAssertionElement)
+
+	// Sign the response
+	signedResponseElement, err := i.signResponse(responseDoc.Root())
+	if err != nil {
+		return nil, fmt.Errorf("failed to sign response: %w", err)
+	}
+
+	// Create final document
+	finalDoc := etree.NewDocument()
+	finalDoc.SetRoot(signedResponseElement)
+
+	// Convert to XML bytes
+	signedXML, err := finalDoc.WriteToBytes()
+	if err != nil {
+		return nil, fmt.Errorf("failed to serialize signed response: %w", err)
+	}
 
 	i.logger.Info("Created SAML Response",
 		zap.String("response_id", response.ID),
@@ -220,11 +248,11 @@ func (i *IdP) CreateResponse(requestID, nameID string, attributes map[string]str
 		zap.Int("attribute_count", len(attributes)),
 	)
 
-	return response, nil
+	return signedXML, nil
 }
 
-// signAssertion signs a SAML assertion using XML digital signatures
-func (i *IdP) signAssertion(assertion *saml.Assertion) (*saml.Assertion, error) {
+// signAssertion signs a SAML assertion and returns the signed XML element
+func (i *IdP) signAssertion(assertion *saml.Assertion) (*etree.Element, error) {
 	// Marshal assertion to XML
 	assertionXML, err := xml.Marshal(assertion)
 	if err != nil {
@@ -240,33 +268,17 @@ func (i *IdP) signAssertion(assertion *saml.Assertion) (*saml.Assertion, error) 
 	// Create key store
 	keyStore := dsig.TLSCertKeyStore{
 		PrivateKey:  i.privateKey,
-		Certificate: [][]byte{i.certificate.Raw}, // Include certificate for verification
+		Certificate: [][]byte{i.certificate.Raw},
 	}
 
 	// Create signing context
 	signingContext := dsig.NewDefaultSigningContext(&keyStore)
 	signingContext.SetSignatureMethod(dsig.RSASHA256SignatureMethod)
 
-	// Sign the document
+	// Sign the document - returns signed element
 	signedElement, err := signingContext.SignEnveloped(doc.Root())
 	if err != nil {
 		return nil, fmt.Errorf("failed to sign assertion: %w", err)
-	}
-
-	// Create new document with signed element
-	signedDoc := etree.NewDocument()
-	signedDoc.SetRoot(signedElement)
-
-	// Convert back to XML bytes
-	signedXML, err := signedDoc.WriteToBytes()
-	if err != nil {
-		return nil, fmt.Errorf("failed to serialize signed assertion: %w", err)
-	}
-
-	// Unmarshal back to assertion struct
-	var signedAssertion saml.Assertion
-	if err := xml.Unmarshal(signedXML, &signedAssertion); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal signed assertion: %w", err)
 	}
 
 	i.logger.Debug("Assertion signed successfully",
@@ -274,60 +286,32 @@ func (i *IdP) signAssertion(assertion *saml.Assertion) (*saml.Assertion, error) 
 		zap.String("signature_method", "RSA-SHA256"),
 	)
 
-	return &signedAssertion, nil
+	return signedElement, nil
 }
 
-// SignResponse signs the SAML response using XML digital signatures
-func (i *IdP) SignResponse(response *saml.Response) error {
-	// Marshal response to XML
-	responseXML, err := xml.Marshal(response)
-	if err != nil {
-		return fmt.Errorf("failed to marshal response: %w", err)
-	}
-
-	// Parse XML into etree document
-	doc := etree.NewDocument()
-	if err := doc.ReadFromBytes(responseXML); err != nil {
-		return fmt.Errorf("failed to parse response XML: %w", err)
-	}
-
+// signResponse signs the SAML response element and returns signed element
+func (i *IdP) signResponse(responseElement *etree.Element) (*etree.Element, error) {
 	// Create key store
 	keyStore := dsig.TLSCertKeyStore{
 		PrivateKey:  i.privateKey,
-		Certificate: [][]byte{i.certificate.Raw}, // Include certificate for verification
+		Certificate: [][]byte{i.certificate.Raw},
 	}
 
 	// Create signing context
 	signingContext := dsig.NewDefaultSigningContext(&keyStore)
 	signingContext.SetSignatureMethod(dsig.RSASHA256SignatureMethod)
 
-	// Sign the document
-	signedElement, err := signingContext.SignEnveloped(doc.Root())
+	// Sign the element
+	signedElement, err := signingContext.SignEnveloped(responseElement)
 	if err != nil {
-		return fmt.Errorf("failed to sign response: %w", err)
-	}
-
-	// Create new document with signed element
-	signedDoc := etree.NewDocument()
-	signedDoc.SetRoot(signedElement)
-
-	// Convert back to XML bytes
-	signedXML, err := signedDoc.WriteToBytes()
-	if err != nil {
-		return fmt.Errorf("failed to serialize signed response: %w", err)
-	}
-
-	// Unmarshal back to response struct
-	if err := xml.Unmarshal(signedXML, response); err != nil {
-		return fmt.Errorf("failed to unmarshal signed response: %w", err)
+		return nil, fmt.Errorf("failed to sign response: %w", err)
 	}
 
 	i.logger.Debug("Response signed successfully",
-		zap.String("response_id", response.ID),
 		zap.String("signature_method", "RSA-SHA256"),
 	)
 
-	return nil
+	return signedElement, nil
 }
 
 // GetMetadata returns the SAML IdP metadata

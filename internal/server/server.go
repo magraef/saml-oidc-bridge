@@ -306,25 +306,10 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Create SAML response
-	samlResponse, err := s.samlIdP.CreateResponse(session.RequestID, nameID, attributes)
+	// Create and sign SAML response (returns signed XML bytes)
+	responseXML, err := s.samlIdP.CreateResponse(session.RequestID, nameID, attributes)
 	if err != nil {
 		s.logger.Error("Failed to create SAML response", zap.Error(err))
-		http.Error(w, "Internal server error", http.StatusInternalServerError)
-		return
-	}
-
-	// Sign response
-	if err := s.samlIdP.SignResponse(samlResponse); err != nil {
-		s.logger.Error("Failed to sign SAML response", zap.Error(err))
-		http.Error(w, "Internal server error", http.StatusInternalServerError)
-		return
-	}
-
-	// Marshal response to XML
-	responseXML, err := xml.Marshal(samlResponse)
-	if err != nil {
-		s.logger.Error("Failed to marshal SAML response", zap.Error(err))
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
