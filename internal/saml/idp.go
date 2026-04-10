@@ -1,6 +1,8 @@
 package saml
 
 import (
+	"bytes"
+	"compress/flate"
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/base64"
@@ -78,7 +80,10 @@ func (i *IdP) ParseAuthnRequest(r *http.Request) (*saml.AuthnRequest, error) {
 	}
 
 	// Decompress (HTTP-Redirect binding uses deflate compression)
-	data, err := io.ReadAll(io.LimitReader(&deflateReader{data: compressedData}, 1024*1024))
+	reader := flate.NewReader(bytes.NewReader(compressedData))
+	defer reader.Close()
+
+	data, err := io.ReadAll(io.LimitReader(reader, 1024*1024))
 	if err != nil {
 		return nil, fmt.Errorf("failed to decompress SAMLRequest: %w", err)
 	}
@@ -95,21 +100,6 @@ func (i *IdP) ParseAuthnRequest(r *http.Request) (*saml.AuthnRequest, error) {
 	)
 
 	return &authnRequest, nil
-}
-
-// deflateReader is a simple wrapper for decompression
-type deflateReader struct {
-	data []byte
-	pos  int
-}
-
-func (r *deflateReader) Read(p []byte) (n int, err error) {
-	if r.pos >= len(r.data) {
-		return 0, io.EOF
-	}
-	n = copy(p, r.data[r.pos:])
-	r.pos += n
-	return n, nil
 }
 
 // GetRelayState extracts the RelayState from the request
