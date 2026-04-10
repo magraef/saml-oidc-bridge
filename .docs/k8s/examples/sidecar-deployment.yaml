@@ -1,0 +1,314 @@
+# Sidecar Deployment Example
+# 
+# This example shows how to deploy saml-oidc-bridge as a sidecar container
+# alongside your application. The bridge handles SAML authentication while
+# your application receives authenticated requests.
+#
+# Benefits of sidecar pattern:
+# - Simplified application code (no SAML handling needed)
+# - Shared network namespace (localhost communication)
+# - Automatic scaling with application
+# - Unified pod lifecycle management
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: myapp
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: saml-oidc-bridge-config
+  namespace: myapp
+data:
+  .env: |
+    # OIDC Configuration
+    OIDC_ISSUER_URL=https://accounts.google.com
+    OIDC_CLIENT_ID=your-client-id.apps.googleusercontent.com
+    OIDC_REDIRECT_URL=https://myapp.example.com/oidc/callback
+    OIDC_SCOPES=openid,profile,email
+    
+    # SAML Configuration
+    SAML_ENTITY_ID=https://myapp.example.com/saml/metadata
+    SAML_ACS_URL=https://myapp.example.com/saml/login
+    
+    # SP Configuration (your application)
+    SP_ENTITY_ID=https://myapp.example.com/saml/sp-metadata
+    SP_ACS_URL=http://localhost:8081/saml/acs
+    
+    # Mapping Configuration
+    MAPPING_NAME_ID=email
+    
+    # Session Configuration
+    SESSION_COOKIE_SECURE=true
+    SESSION_COOKIE_NAME=saml-oidc-bridge-session
+    
+    # Server Configuration
+    SERVER_ADDRESS=:8080
+    
+    # Storage Configuration
+    STORAGE_DATABASE_PATH=/data/saml-oidc-bridge.db
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: saml-oidc-bridge-secrets
+  namespace: myapp
+type: Opaque
+stringData:
+  oidc-client-secret: "your-oidc-client-secret"
+  session-cookie-secret: "your-random-session-secret-32-bytes-min"
+---
+# Certificate managed by cert-manager
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: saml-oidc-bridge-cert
+  namespace: myapp
+spec:
+  secretName: saml-oidc-bridge-tls
+  issuerRef:
+    name: letsencrypt-prod
+    kind: ClusterIssuer
+  dnsNames:
+    - myapp.example.com
+  usages:
+    - digital signature
+    - key encipherment
+    - server auth
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: myapp
+  namespace: myapp
+  labels:
+    app: myapp
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: myapp
+  template:
+    metadata:
+      labels:
+        app: myapp
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        fsGroup: 65532
+      
+      # Shared volume for database and communication
+      volumes:
+      - name: shared-data
+        emptyDir: {}
+      - name: bridge-config
+        configMap:
+          name: saml-oidc-bridge-config
+      - name: bridge-certs
+        secret:
+          secretName: saml-oidc-bridge-tls
+      
+      containers:
+      # SAML OIDC Bridge Sidecar
+      - name: saml-oidc-bridge
+        image: ghcr.io/your-org/saml-oidc-bridge:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8080
+          name: http
+          protocol: TCP
+        
+        env:
+        # Load from ConfigMap
+        - name: OIDC_CLIENT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: saml-oidc-bridge-secrets
+              key: oidc-client-secret
+        - name: SESSION_COOKIE_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: saml-oidc-bridge-secrets
+              key: session-cookie-secret
+        - name: SAML_CERTIFICATE_PATH
+          value: "/certs/tls.crt"
+        - name: SAML_PRIVATE_KEY_PATH
+          value: "/certs/tls.key"
+        # Additional attribute mappings
+        - name: MAPPING_ATTR_EMAIL
+          value: "email"
+        - name: MAPPING_ATTR_USERNAME
+          value: "preferred_username"
+        - name: MAPPING_ATTR_DISPLAYNAME
+          value: "name"
+        
+        volumeMounts:
+        - name: shared-data
+          mountPath: /data
+        - name: bridge-config
+          mountPath: /app/.env
+          subPath: .env
+          readOnly: true
+        - name: bridge-certs
+          mountPath: /certs
+          readOnly: true
+        
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "500m"
+        
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 30
+        
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 65532
+          capabilities:
+            drop:
+            - ALL
+      
+      # Your Application Container
+      - name: myapp
+        image: your-app:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8081
+          name: app-http
+          protocol: TCP
+        
+        env:
+        # Application can access bridge via localhost:8080
+        - name: SAML_BRIDGE_URL
+          value: "http://localhost:8080"
+        - name: APP_PORT
+          value: "8081"
+        
+        volumeMounts:
+        - name: shared-data
+          mountPath: /data
+        
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "200m"
+          limits:
+            memory: "512Mi"
+            cpu: "1000m"
+        
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8081
+          initialDelaySeconds: 15
+          periodSeconds: 30
+        
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 8081
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        
+        securityContext:
+          allowPrivilegeEscalation: false
+          runAsNonRoot: true
+          runAsUser: 1000
+          capabilities:
+            drop:
+            - ALL
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: myapp
+  namespace: myapp
+  labels:
+    app: myapp
+spec:
+  type: ClusterIP
+  ports:
+  # SAML OIDC Bridge port (for SAML/OIDC flows)
+  - port: 8080
+    targetPort: 8080
+    protocol: TCP
+    name: saml-bridge
+  # Application port (for authenticated requests)
+  - port: 8081
+    targetPort: 8081
+    protocol: TCP
+    name: app
+  selector:
+    app: myapp
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: myapp
+  namespace: myapp
+  annotations:
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    # Route SAML/OIDC paths to bridge, everything else to app
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      if ($request_uri ~* "^/(saml|oidc|metadata)") {
+        set $proxy_upstream_name "myapp-myapp-8080";
+      }
+spec:
+  ingressClassName: nginx
+  tls:
+  - hosts:
+    - myapp.example.com
+    secretName: myapp-tls
+  rules:
+  - host: myapp.example.com
+    http:
+      paths:
+      # SAML/OIDC endpoints go to bridge
+      - path: /saml
+        pathType: Prefix
+        backend:
+          service:
+            name: myapp
+            port:
+              number: 8080
+      - path: /oidc
+        pathType: Prefix
+        backend:
+          service:
+            name: myapp
+            port:
+              number: 8080
+      - path: /metadata
+        pathType: Exact
+        backend:
+          service:
+            name: myapp
+            port:
+              number: 8080
+      # All other paths go to application
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: myapp
+            port:
+              number: 8081

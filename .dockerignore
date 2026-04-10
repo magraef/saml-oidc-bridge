@@ -1,0 +1,33 @@
+# Ignore build artifacts
+saml-oauth-bridge
+*.db
+*.db-journal
+
+# Ignore development files
+.git
+.gitignore
+.idea
+.vscode
+*.swp
+*.swo
+*~
+
+Makefile
+
+# Ignore test files
+*_test.go
+testdata/
+
+# Ignore documentation
+README.md
+.docs/
+
+# Ignore example configs (use ConfigMaps in k8s)
+.env
+.env.example
+
+# Ignore certificates (mount as secrets in k8s)
+certs/
+*.crt
+*.key
+*.pem
