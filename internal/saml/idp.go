@@ -13,7 +13,9 @@ import (
 	"net/url"
 	"time"
 
+	"github.com/beevik/etree"
 	"github.com/crewjam/saml"
+	dsig "github.com/russellhaering/goxmldsig"
 	"go.uber.org/zap"
 )
 
@@ -221,20 +223,110 @@ func (i *IdP) CreateResponse(requestID, nameID string, attributes map[string]str
 	return response, nil
 }
 
-// signAssertion signs a SAML assertion
+// signAssertion signs a SAML assertion using XML digital signatures
 func (i *IdP) signAssertion(assertion *saml.Assertion) (*saml.Assertion, error) {
-	// For simplicity in this PoC, we'll return the unsigned assertion
-	// In production, use proper XML signing with goxmldsig
-	i.logger.Debug("Assertion prepared (signing simplified for PoC)")
+	// Marshal assertion to XML
+	assertionXML, err := xml.Marshal(assertion)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal assertion: %w", err)
+	}
 
-	return assertion, nil
+	// Parse XML into etree document
+	doc := etree.NewDocument()
+	if err := doc.ReadFromBytes(assertionXML); err != nil {
+		return nil, fmt.Errorf("failed to parse assertion XML: %w", err)
+	}
+
+	// Create key store
+	keyStore := dsig.TLSCertKeyStore{
+		PrivateKey:  i.privateKey,
+		Certificate: [][]byte{i.certificate.Raw}, // Include certificate for verification
+	}
+
+	// Create signing context
+	signingContext := dsig.NewDefaultSigningContext(&keyStore)
+	signingContext.SetSignatureMethod(dsig.RSASHA256SignatureMethod)
+
+	// Sign the document
+	signedElement, err := signingContext.SignEnveloped(doc.Root())
+	if err != nil {
+		return nil, fmt.Errorf("failed to sign assertion: %w", err)
+	}
+
+	// Create new document with signed element
+	signedDoc := etree.NewDocument()
+	signedDoc.SetRoot(signedElement)
+
+	// Convert back to XML bytes
+	signedXML, err := signedDoc.WriteToBytes()
+	if err != nil {
+		return nil, fmt.Errorf("failed to serialize signed assertion: %w", err)
+	}
+
+	// Unmarshal back to assertion struct
+	var signedAssertion saml.Assertion
+	if err := xml.Unmarshal(signedXML, &signedAssertion); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal signed assertion: %w", err)
+	}
+
+	i.logger.Debug("Assertion signed successfully",
+		zap.String("assertion_id", assertion.ID),
+		zap.String("signature_method", "RSA-SHA256"),
+	)
+
+	return &signedAssertion, nil
 }
 
-// SignResponse signs the SAML response (placeholder for PoC)
+// SignResponse signs the SAML response using XML digital signatures
 func (i *IdP) SignResponse(response *saml.Response) error {
-	// In a production system, you would sign the response here
-	// For this PoC, we're keeping it simple
-	i.logger.Debug("Response prepared (signing simplified for PoC)")
+	// Marshal response to XML
+	responseXML, err := xml.Marshal(response)
+	if err != nil {
+		return fmt.Errorf("failed to marshal response: %w", err)
+	}
+
+	// Parse XML into etree document
+	doc := etree.NewDocument()
+	if err := doc.ReadFromBytes(responseXML); err != nil {
+		return fmt.Errorf("failed to parse response XML: %w", err)
+	}
+
+	// Create key store
+	keyStore := dsig.TLSCertKeyStore{
+		PrivateKey:  i.privateKey,
+		Certificate: [][]byte{i.certificate.Raw}, // Include certificate for verification
+	}
+
+	// Create signing context
+	signingContext := dsig.NewDefaultSigningContext(&keyStore)
+	signingContext.SetSignatureMethod(dsig.RSASHA256SignatureMethod)
+
+	// Sign the document
+	signedElement, err := signingContext.SignEnveloped(doc.Root())
+	if err != nil {
+		return fmt.Errorf("failed to sign response: %w", err)
+	}
+
+	// Create new document with signed element
+	signedDoc := etree.NewDocument()
+	signedDoc.SetRoot(signedElement)
+
+	// Convert back to XML bytes
+	signedXML, err := signedDoc.WriteToBytes()
+	if err != nil {
+		return fmt.Errorf("failed to serialize signed response: %w", err)
+	}
+
+	// Unmarshal back to response struct
+	if err := xml.Unmarshal(signedXML, response); err != nil {
+		return fmt.Errorf("failed to unmarshal signed response: %w", err)
+	}
+
+	i.logger.Debug("Response signed successfully",
+		zap.String("response_id", response.ID),
+		zap.String("signature_method", "RSA-SHA256"),
+	)
+
 	return nil
 }
 
