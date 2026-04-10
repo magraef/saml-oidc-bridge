@@ -117,7 +117,8 @@ func (i *IdP) CreateResponse(requestID, nameID string, attributes map[string]str
 		IssueInstant: now,
 		Version:      "2.0",
 		Issuer: saml.Issuer{
-			Value: i.entityID,
+			Format: "urn:oasis:names:tc:SAML:2.0:nameid-format:entity",
+			Value:  i.entityID,
 		},
 		Subject: &saml.Subject{
 			NameID: &saml.NameID{
@@ -191,7 +192,8 @@ func (i *IdP) CreateResponse(requestID, nameID string, attributes map[string]str
 		IssueInstant: now,
 		Destination:  i.spACSURL,
 		Issuer: &saml.Issuer{
-			Value: i.entityID,
+			Format: "urn:oasis:names:tc:SAML:2.0:nameid-format:entity",
+			Value:  i.entityID,
 		},
 		Status: saml.Status{
 			StatusCode: saml.StatusCode{
