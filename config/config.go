@@ -88,6 +88,38 @@ func Load(envPath string) (*Config, error) {
 		return nil, fmt.Errorf("failed to parse environment variables: %w", err)
 	}
 
+	// Parse individual attribute mappings (MAPPING_ATTR_*)
+	// This allows setting attributes individually in Kubernetes/Docker environments
+	if cfg.Mapping.Attributes == nil {
+		cfg.Mapping.Attributes = make(map[string]string)
+	}
+
+	// Scan environment for MAPPING_ATTR_* variables
+	for _, envVar := range os.Environ() {
+		if len(envVar) > 13 && envVar[:13] == "MAPPING_ATTR_" {
+			// Split on first '='
+			parts := splitOnce(envVar, "=")
+			if len(parts) == 2 {
+				// Extract attribute name (lowercase the part after MAPPING_ATTR_)
+				attrName := parts[0][13:] // Remove "MAPPING_ATTR_" prefix
+				attrValue := parts[1]
+
+				// Convert to lowercase for consistency
+				// e.g., MAPPING_ATTR_EMAIL -> email, MAPPING_ATTR_USERNAME -> username
+				attrNameLower := ""
+				for _, c := range attrName {
+					if c >= 'A' && c <= 'Z' {
+						attrNameLower += string(c + 32) // Convert to lowercase
+					} else {
+						attrNameLower += string(c)
+					}
+				}
+
+				cfg.Mapping.Attributes[attrNameLower] = attrValue
+			}
+		}
+	}
+
 	// Handle Port override for Address if Port is set
 	if cfg.Server.Port > 0 {
 		cfg.Server.Address = fmt.Sprintf(":%d", cfg.Server.Port)
@@ -99,6 +131,21 @@ func Load(envPath string) (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// splitOnce splits a string on the first occurrence of sep
+func splitOnce(s, sep string) []string {
+	idx := 0
+	for i := 0; i < len(s); i++ {
+		if s[i] == sep[0] {
+			idx = i
+			break
+		}
+	}
+	if idx == 0 {
+		return []string{s}
+	}
+	return []string{s[:idx], s[idx+1:]}
 }
 
 // Validate checks that all required configuration fields are set
