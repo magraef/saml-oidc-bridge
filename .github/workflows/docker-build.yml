@@ -23,6 +23,7 @@ jobs:
       contents: read
       packages: write
       id-token: write
+      attestations: write
 
     steps:
       - name: Checkout repository
@@ -61,12 +62,14 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ github.event_name == 'pull_request' && 'linux/amd64' || 'linux/amd64,linux/arm64' }}
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          provenance: false
+          sbom: false
           build-args: |
             VERSION=${{ steps.meta.outputs.version }}
             COMMIT=${{ github.sha }}
