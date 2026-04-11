@@ -60,7 +60,7 @@ func main() {
 
 	errChan := make(chan error, 1)
 	go func() {
-		errChan <- srv.Start()
+		errChan <- srv.Start(cfg.Server.Address)
 	}()
 
 	// Wait for shutdown signal or error

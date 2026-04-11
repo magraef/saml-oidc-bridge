@@ -57,11 +57,23 @@ func TestGetRelayState(t *testing.T) {
 
 func TestCreateResponse(t *testing.T) {
 	logger := zaptest.NewLogger(t)
-	idp := &IdP{
-		entityID:   "https://proxy.example.com",
-		spEntityID: "https://app.example.com",
-		spACSURL:   "https://app.example.com/saml/acs",
-		logger:     logger,
+
+	// Create certificate provider for signing
+	certProvider, err := NewSelfSignedCertificateProvider(logger)
+	if err != nil {
+		t.Fatalf("Failed to create certificate provider: %v", err)
+	}
+
+	idp, err := NewIdP(
+		"https://proxy.example.com",
+		"https://proxy.example.com/saml/acs",
+		"https://app.example.com",
+		"https://app.example.com/saml/acs",
+		certProvider,
+		logger,
+	)
+	if err != nil {
+		t.Fatalf("Failed to create IdP: %v", err)
 	}
 
 	requestID := "test-request-id"
@@ -72,101 +84,98 @@ func TestCreateResponse(t *testing.T) {
 		"name":     "Test User",
 	}
 
-	response, err := idp.CreateResponse(requestID, nameID, attributes)
+	responseXML, err := idp.CreateResponse(requestID, nameID, attributes)
 	if err != nil {
 		t.Fatalf("CreateResponse() error = %v", err)
 	}
 
-	// Verify response structure
-	if response.InResponseTo != requestID {
-		t.Errorf("InResponseTo = %s, want %s", response.InResponseTo, requestID)
+	// Verify we got XML bytes
+	if len(responseXML) == 0 {
+		t.Fatal("CreateResponse returned empty XML")
 	}
 
-	if response.Destination != idp.spACSURL {
-		t.Errorf("Destination = %s, want %s", response.Destination, idp.spACSURL)
+	// Verify XML contains expected elements (basic validation)
+	responseStr := string(responseXML)
+
+	if !contains(responseStr, requestID) {
+		t.Errorf("Response XML does not contain InResponseTo=%s", requestID)
 	}
 
-	if response.Issuer.Value != idp.entityID {
-		t.Errorf("Issuer = %s, want %s", response.Issuer.Value, idp.entityID)
+	if !contains(responseStr, idp.spACSURL) {
+		t.Errorf("Response XML does not contain Destination=%s", idp.spACSURL)
 	}
 
-	if response.Status.StatusCode.Value != "urn:oasis:names:tc:SAML:2.0:status:Success" {
-		t.Errorf("StatusCode = %s, want Success", response.Status.StatusCode.Value)
+	if !contains(responseStr, idp.entityID) {
+		t.Errorf("Response XML does not contain Issuer=%s", idp.entityID)
 	}
 
-	// Verify assertion
-	if response.Assertion == nil {
-		t.Fatal("Assertion is nil")
+	if !contains(responseStr, "urn:oasis:names:tc:SAML:2.0:status:Success") {
+		t.Error("Response XML does not contain Success status")
 	}
 
-	if response.Assertion.Subject.NameID.Value != nameID {
-		t.Errorf("NameID = %s, want %s", response.Assertion.Subject.NameID.Value, nameID)
+	if !contains(responseStr, nameID) {
+		t.Errorf("Response XML does not contain NameID=%s", nameID)
 	}
 
-	// Verify attributes
-	if len(response.Assertion.AttributeStatements) == 0 {
-		t.Fatal("No attribute statements")
+	// Verify attributes are present
+	if !contains(responseStr, "email") {
+		t.Error("Response XML does not contain email attribute")
 	}
 
-	attrs := response.Assertion.AttributeStatements[0].Attributes
-	if len(attrs) != len(attributes) {
-		t.Errorf("Expected %d attributes, got %d", len(attributes), len(attrs))
+	if !contains(responseStr, "user@example.com") {
+		t.Error("Response XML does not contain email value")
 	}
+}
 
-	// Verify specific attributes
-	foundEmail := false
-	for _, attr := range attrs {
-		if attr.Name == "email" {
-			foundEmail = true
-			if len(attr.Values) == 0 || attr.Values[0].Value != "user@example.com" {
-				t.Errorf("Email attribute value incorrect")
-			}
+// Helper function to check if string contains substring
+func contains(s, substr string) bool {
+	return len(s) > 0 && len(substr) > 0 && (s == substr || len(s) >= len(substr) && (s[:len(substr)] == substr || s[len(s)-len(substr):] == substr || containsMiddle(s, substr)))
+}
+
+func containsMiddle(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
 		}
 	}
-	if !foundEmail {
-		t.Error("Email attribute not found")
-	}
+	return false
 }
 
 func TestCreateResponse_NoAttributes(t *testing.T) {
 	logger := zaptest.NewLogger(t)
-	idp := &IdP{
-		entityID:   "https://proxy.example.com",
-		spEntityID: "https://app.example.com",
-		spACSURL:   "https://app.example.com/saml/acs",
-		logger:     logger,
+
+	// Create certificate provider for signing
+	certProvider, err := NewSelfSignedCertificateProvider(logger)
+	if err != nil {
+		t.Fatalf("Failed to create certificate provider: %v", err)
 	}
 
-	response, err := idp.CreateResponse("test-id", "user@example.com", nil)
+	idp, err := NewIdP(
+		"https://proxy.example.com",
+		"https://proxy.example.com/saml/acs",
+		"https://app.example.com",
+		"https://app.example.com/saml/acs",
+		certProvider,
+		logger,
+	)
+	if err != nil {
+		t.Fatalf("Failed to create IdP: %v", err)
+	}
+
+	responseXML, err := idp.CreateResponse("test-id", "user@example.com", nil)
 	if err != nil {
 		t.Fatalf("CreateResponse() error = %v", err)
 	}
 
-	// Should still create response without attributes
-	if response.Assertion == nil {
-		t.Fatal("Assertion is nil")
+	// Should still create valid XML response
+	if len(responseXML) == 0 {
+		t.Fatal("CreateResponse returned empty XML")
 	}
 
-	if len(response.Assertion.AttributeStatements) != 0 {
-		t.Errorf("Expected no attribute statements, got %d", len(response.Assertion.AttributeStatements))
-	}
-}
+	responseStr := string(responseXML)
 
-func TestSignResponse(t *testing.T) {
-	logger := zaptest.NewLogger(t)
-	idp := &IdP{
-		entityID: "https://proxy.example.com",
-		logger:   logger,
-	}
-
-	response, err := idp.CreateResponse("test-id", "user@example.com", nil)
-	if err != nil {
-		t.Fatalf("CreateResponse() error = %v", err)
-	}
-
-	// SignResponse should not error (even though it's simplified for PoC)
-	err = idp.SignResponse(response)
-	if err != nil {
-		t.Errorf("SignResponse() error = %v", err)
+	// Verify basic structure exists
+	if !contains(responseStr, "user@example.com") {
+		t.Error("Response XML does not contain NameID")
 	}
 }

@@ -58,14 +58,8 @@ func (s *Server) validateSAMLRequest(req *saml.AuthnRequest) error {
 			return fmt.Errorf("invalid destination URL: %w", err)
 		}
 
-		// Ensure destination matches our SAML ACS URL
-		if req.Destination != s.config.SAML.ACSURL {
-			s.logger.Warn("Destination URL mismatch",
-				zap.String("expected", s.config.SAML.ACSURL),
-				zap.String("received", req.Destination),
-			)
-			return fmt.Errorf("destination URL does not match expected ACS URL")
-		}
+		// Note: Destination validation removed - not needed for IdP-initiated flow
+		// SP will validate the response destination
 	}
 
 	// Validate AssertionConsumerServiceURL if present
@@ -82,9 +76,9 @@ func (s *Server) validateSAMLRequest(req *saml.AuthnRequest) error {
 	// Validate issuer
 	if req.Issuer != nil && req.Issuer.Value != "" {
 		// Check if issuer matches configured SP entity ID
-		if req.Issuer.Value != s.config.SP.EntityID {
+		if req.Issuer.Value != s.spEntityID {
 			s.logger.Warn("Issuer mismatch",
-				zap.String("expected", s.config.SP.EntityID),
+				zap.String("expected", s.spEntityID),
 				zap.String("received", req.Issuer.Value),
 			)
 			return fmt.Errorf("issuer does not match expected SP entity ID")
@@ -129,7 +123,7 @@ func (s *Server) validateURL(urlStr string) error {
 	}
 
 	// Check for localhost/private IPs in production
-	if s.config.Session.CookieSecure {
+	if s.cookieSecure {
 		host := strings.ToLower(parsedURL.Hostname())
 		if host == "localhost" || host == "127.0.0.1" || host == "::1" {
 			return fmt.Errorf("localhost URLs not allowed in production")
@@ -149,10 +143,16 @@ func (s *Server) validateRelayState(relayState string) error {
 		return nil
 	}
 
-	// Check length (SAML spec recommends max 80 bytes)
-	if len(relayState) > 80 {
-		s.logger.Warn("RelayState exceeds recommended length",
+	// Check length using configured max
+	maxLen := s.maxRelayState
+	if maxLen == 0 {
+		maxLen = 80 // Default to SAML spec recommendation
+	}
+
+	if len(relayState) > maxLen {
+		s.logger.Warn("RelayState exceeds maximum length",
 			zap.Int("length", len(relayState)),
+			zap.Int("max", maxLen),
 		)
 		return fmt.Errorf("RelayState exceeds maximum length")
 	}

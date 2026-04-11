@@ -2,32 +2,38 @@ package server
 
 import (
 	"context"
-	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
 	"html/template"
 	"net/http"
-	"saml-oidc-bridge/internal/oidc"
-	"saml-oidc-bridge/internal/saml"
 	"time"
 
 	"saml-oidc-bridge/config"
+	"saml-oidc-bridge/internal/oidc"
+	"saml-oidc-bridge/internal/saml"
 	"saml-oidc-bridge/internal/storage"
 
-	_ "github.com/mattn/go-sqlite3"
 	"go.uber.org/zap"
 )
 
 // Server represents the HTTP server
 type Server struct {
-	config     *config.Config
-	oidcClient *oidc.Client
-	samlIdP    *saml.IdP
-	db         *sql.DB
-	queries    *storage.Queries
-	logger     *zap.Logger
+	oidcAuth         OIDCAuthenticator
+	samlParser       SAMLRequestParser
+	samlResponder    SAMLResponseCreator
+	samlMetadata     SAMLMetadataProvider
+	samlRequestStore SAMLRequestStore
+	requestCleaner   ExpiredRequestCleaner
+	claimsMapper     ClaimsMapper
+	store            *storage.Store
+	logger           *zap.Logger
+	cookieName       string
+	cookieSecure     bool
+	spEntityID       string
+	spACSURL         string
+	maxRelayState    int
 }
 
 // sessionData represents data stored in the session cookie
@@ -37,7 +43,7 @@ type sessionData struct {
 	State      string
 }
 
-// NewServer creates a new HTTP server
+// NewServer creates a new HTTP server with concrete implementations
 func NewServer(cfg *config.Config, logger *zap.Logger) (*Server, error) {
 	ctx := context.Background()
 
@@ -56,7 +62,6 @@ func NewServer(cfg *config.Config, logger *zap.Logger) (*Server, error) {
 	}
 
 	// Create certificate provider based on configuration
-	// If certificate paths are provided, use file-path provider, otherwise use self-signed
 	var certProvider saml.CertificateProvider
 	if cfg.SAML.CertificatePath != "" && cfg.SAML.PrivateKeyPath != "" {
 		certProvider, err = saml.NewFilePathCertificateProvider(
@@ -87,28 +92,14 @@ func NewServer(cfg *config.Config, logger *zap.Logger) (*Server, error) {
 		return nil, fmt.Errorf("failed to create SAML IdP: %w", err)
 	}
 
-	// Initialize database
-	db, err := sql.Open("sqlite3", cfg.Storage.DatabasePath)
+	// Initialize storage with migrations
+	store, err := storage.NewStore(cfg.Storage.DatabasePath, logger)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open database: %w", err)
+		return nil, fmt.Errorf("failed to create storage: %w", err)
 	}
 
-	// Create tables
-	schema := `
-	CREATE TABLE IF NOT EXISTS saml_requests (
-		id TEXT PRIMARY KEY,
-		relay_state TEXT NOT NULL,
-		sp_acs_url TEXT NOT NULL,
-		created_at INTEGER NOT NULL,
-		expires_at INTEGER NOT NULL
-	);
-	CREATE INDEX IF NOT EXISTS idx_saml_requests_expires_at ON saml_requests(expires_at);
-	`
-	if _, err := db.Exec(schema); err != nil {
-		return nil, fmt.Errorf("failed to create schema: %w", err)
-	}
-
-	queries := storage.New(db)
+	// Create claims mapper
+	claimsMapper := NewConfigClaimsMapper(&cfg.Mapping)
 
 	logger.Info("Server initialized",
 		zap.String("address", cfg.Server.Address),
@@ -116,17 +107,60 @@ func NewServer(cfg *config.Config, logger *zap.Logger) (*Server, error) {
 	)
 
 	return &Server{
-		config:     cfg,
-		oidcClient: oidcClient,
-		samlIdP:    samlIdP,
-		db:         db,
-		queries:    queries,
-		logger:     logger,
+		oidcAuth:         oidcClient,
+		samlParser:       samlIdP,
+		samlResponder:    samlIdP,
+		samlMetadata:     samlIdP,
+		samlRequestStore: store,
+		requestCleaner:   store,
+		claimsMapper:     claimsMapper,
+		store:            store,
+		logger:           logger,
+		cookieName:       cfg.Session.CookieName,
+		cookieSecure:     cfg.Session.CookieSecure,
+		spEntityID:       cfg.SP.EntityID,
+		spACSURL:         cfg.SP.ACSURL,
+		maxRelayState:    80, // Default SAML spec recommendation
 	}, nil
 }
 
+// NewServerWithDependencies creates a new HTTP server with injected dependencies (for testing)
+func NewServerWithDependencies(
+	oidcAuth OIDCAuthenticator,
+	samlParser SAMLRequestParser,
+	samlResponder SAMLResponseCreator,
+	samlMetadata SAMLMetadataProvider,
+	samlRequestStore SAMLRequestStore,
+	requestCleaner ExpiredRequestCleaner,
+	claimsMapper ClaimsMapper,
+	store *storage.Store,
+	logger *zap.Logger,
+	cookieName string,
+	cookieSecure bool,
+	spEntityID string,
+	spACSURL string,
+	maxRelayState int,
+) *Server {
+	return &Server{
+		oidcAuth:         oidcAuth,
+		samlParser:       samlParser,
+		samlResponder:    samlResponder,
+		samlMetadata:     samlMetadata,
+		samlRequestStore: samlRequestStore,
+		requestCleaner:   requestCleaner,
+		claimsMapper:     claimsMapper,
+		store:            store,
+		logger:           logger,
+		cookieName:       cookieName,
+		cookieSecure:     cookieSecure,
+		spEntityID:       spEntityID,
+		spACSURL:         spACSURL,
+		maxRelayState:    maxRelayState,
+	}
+}
+
 // Start starts the HTTP server
-func (s *Server) Start() error {
+func (s *Server) Start(address string) error {
 	mux := http.NewServeMux()
 
 	// Register handlers
@@ -139,10 +173,10 @@ func (s *Server) Start() error {
 	// Start cleanup goroutine
 	go s.cleanupExpiredRequests()
 
-	s.logger.Info("Starting HTTP server", zap.String("address", s.config.Server.Address))
+	s.logger.Info("Starting HTTP server", zap.String("address", address))
 
 	server := &http.Server{
-		Addr:         s.config.Server.Address,
+		Addr:         address,
 		Handler:      s.securityHeadersMiddleware(s.loggingMiddleware(mux)),
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 15 * time.Second,
@@ -159,7 +193,7 @@ func (s *Server) handleSAMLLogin(w http.ResponseWriter, r *http.Request) {
 	s.logger.Info("Received SAML login request", zap.String("remote_addr", r.RemoteAddr))
 
 	// Parse SAML AuthnRequest
-	authnRequest, err := s.samlIdP.ParseAuthnRequest(r)
+	authnRequest, err := s.samlParser.ParseAuthnRequest(r)
 	if err != nil {
 		s.logger.Error("Failed to parse AuthnRequest", zap.Error(err))
 		http.Error(w, "Invalid SAML request", http.StatusBadRequest)
@@ -174,7 +208,7 @@ func (s *Server) handleSAMLLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Get RelayState
-	relayState := s.samlIdP.GetRelayState(r)
+	relayState := s.samlParser.GetRelayState(r)
 
 	// Validate RelayState
 	if err := s.validateRelayState(relayState); err != nil {
@@ -191,17 +225,18 @@ func (s *Server) handleSAMLLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Store request in database
-	now := time.Now().Unix()
-	expires := time.Now().Add(10 * time.Minute).Unix()
+	// Store request in session store
+	// Note: SP ACS URL is retrieved from the parsed SAML request's AssertionConsumerServiceURL
+	// or we need to pass it as a parameter. For now, using a placeholder approach.
+	spACSURL := authnRequest.AssertionConsumerServiceURL
+	if spACSURL == "" {
+		// Fallback: this should be validated earlier
+		s.logger.Error("Missing ACS URL in SAML request")
+		http.Error(w, "Invalid SAML request", http.StatusBadRequest)
+		return
+	}
 
-	err = s.queries.CreateSAMLRequest(ctx, storage.CreateSAMLRequestParams{
-		ID:         authnRequest.ID,
-		RelayState: relayState,
-		SpAcsUrl:   s.config.SP.ACSURL,
-		CreatedAt:  now,
-		ExpiresAt:  expires,
-	})
+	err = s.samlRequestStore.StoreSAMLRequest(ctx, authnRequest.ID, relayState, spACSURL)
 	if err != nil {
 		s.logger.Error("Failed to store SAML request", zap.Error(err))
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
@@ -222,7 +257,7 @@ func (s *Server) handleSAMLLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Redirect to OIDC provider
-	authURL := s.oidcClient.GetAuthorizationURL(state)
+	authURL := s.oidcAuth.GetAuthorizationURL(state)
 	s.logger.Info("Redirecting to OIDC provider",
 		zap.String("request_id", authnRequest.ID),
 		zap.String("state", state),
@@ -273,7 +308,7 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Exchange code for tokens
-	userClaims, err := s.oidcClient.HandleCallback(ctx, code)
+	userClaims, err := s.oidcAuth.ExchangeCodeForToken(ctx, code)
 	if err != nil {
 		s.logger.Error("Failed to handle callback", zap.Error(err))
 		http.Error(w, "Authentication failed", http.StatusInternalServerError)
@@ -281,33 +316,25 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Get stored SAML request
-	samlRequest, err := s.queries.GetSAMLRequest(ctx, session.RequestID)
+	relayState, spACSURL, err := s.samlRequestStore.GetSAMLRequestData(ctx, session.RequestID)
 	if err != nil {
 		s.logger.Error("Failed to get SAML request", zap.Error(err))
 		http.Error(w, "Invalid request", http.StatusBadRequest)
 		return
 	}
 
-	// Map OIDC claims to SAML attributes
-	nameID := userClaims.GetClaimValue(s.config.Mapping.NameID)
+	// Map OIDC claims to SAML attributes using the claims mapper
+	nameID := s.claimsMapper.GetNameID(userClaims)
 	if nameID == "" {
-		s.logger.Error("Failed to get NameID from claims",
-			zap.String("name_id_claim", s.config.Mapping.NameID),
-		)
+		s.logger.Error("Failed to get NameID from claims")
 		http.Error(w, "Missing required claim", http.StatusInternalServerError)
 		return
 	}
 
-	attributes := make(map[string]string)
-	for samlAttr, oidcClaim := range s.config.Mapping.Attributes {
-		value := userClaims.GetClaimValue(oidcClaim)
-		if value != "" {
-			attributes[samlAttr] = value
-		}
-	}
+	attributes := s.claimsMapper.MapAttributes(userClaims)
 
 	// Create and sign SAML response (returns signed XML bytes)
-	responseXML, err := s.samlIdP.CreateResponse(session.RequestID, nameID, attributes)
+	responseXML, err := s.samlResponder.CreateResponse(session.RequestID, nameID, attributes)
 	if err != nil {
 		s.logger.Error("Failed to create SAML response", zap.Error(err))
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
@@ -318,7 +345,7 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 	responseEncoded := base64.StdEncoding.EncodeToString(responseXML)
 
 	// Delete used request
-	if err := s.queries.DeleteSAMLRequest(ctx, session.RequestID); err != nil {
+	if err := s.samlRequestStore.DeleteSAMLRequest(ctx, session.RequestID); err != nil {
 		s.logger.Warn("Failed to delete SAML request", zap.Error(err))
 	}
 
@@ -326,12 +353,12 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 	s.clearSession(w)
 
 	s.logger.Info("Sending SAML response to SP",
-		zap.String("sp_acs_url", samlRequest.SpAcsUrl),
+		zap.String("sp_acs_url", spACSURL),
 		zap.String("name_id", nameID),
 	)
 
 	// Render auto-submit form
-	s.renderSAMLResponse(w, samlRequest.SpAcsUrl, responseEncoded, samlRequest.RelayState)
+	s.renderSAMLResponse(w, spACSURL, responseEncoded, relayState)
 }
 
 // handleSAMLACS handles POST to ACS (not typically used in this flow)
@@ -344,7 +371,7 @@ func (s *Server) handleSAMLACS(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 	s.logger.Debug("Serving SAML metadata")
 
-	metadata, err := s.samlIdP.GetMetadata()
+	metadata, err := s.samlMetadata.GetMetadata()
 	if err != nil {
 		s.logger.Error("Failed to generate metadata", zap.Error(err))
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
@@ -379,12 +406,12 @@ func (s *Server) setSession(w http.ResponseWriter, data sessionData) error {
 	}
 
 	cookie := &http.Cookie{
-		Name:     s.config.Session.CookieName,
+		Name:     s.cookieName,
 		Value:    base64.StdEncoding.EncodeToString(sessionJSON),
 		Path:     "/",
 		MaxAge:   600, // 10 minutes
 		HttpOnly: true,
-		Secure:   s.config.Session.CookieSecure,
+		Secure:   s.cookieSecure,
 		SameSite: http.SameSiteLaxMode,
 	}
 
@@ -394,7 +421,7 @@ func (s *Server) setSession(w http.ResponseWriter, data sessionData) error {
 
 // getSession retrieves session data from a cookie
 func (s *Server) getSession(r *http.Request) (*sessionData, error) {
-	cookie, err := r.Cookie(s.config.Session.CookieName)
+	cookie, err := r.Cookie(s.cookieName)
 	if err != nil {
 		return nil, fmt.Errorf("session cookie not found: %w", err)
 	}
@@ -415,7 +442,7 @@ func (s *Server) getSession(r *http.Request) (*sessionData, error) {
 // clearSession removes the session cookie
 func (s *Server) clearSession(w http.ResponseWriter) {
 	cookie := &http.Cookie{
-		Name:     s.config.Session.CookieName,
+		Name:     s.cookieName,
 		Value:    "",
 		Path:     "/",
 		MaxAge:   -1,
@@ -472,7 +499,7 @@ func (s *Server) cleanupExpiredRequests() {
 		ctx := context.Background()
 		now := time.Now().Unix()
 
-		if err := s.queries.DeleteExpiredRequests(ctx, now); err != nil {
+		if err := s.requestCleaner.CleanupExpired(ctx, now); err != nil {
 			s.logger.Error("Failed to cleanup expired requests", zap.Error(err))
 		} else {
 			s.logger.Debug("Cleaned up expired requests")
@@ -482,8 +509,8 @@ func (s *Server) cleanupExpiredRequests() {
 
 // Close closes the server resources
 func (s *Server) Close() error {
-	if s.db != nil {
-		return s.db.Close()
+	if s.store != nil {
+		return s.store.Close()
 	}
 	return nil
 }

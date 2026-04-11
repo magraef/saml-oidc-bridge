@@ -78,8 +78,9 @@ func GenerateState() (string, error) {
 	return base64.URLEncoding.EncodeToString(b), nil
 }
 
-// HandleCallback processes the OAuth2 callback and exchanges the code for tokens
-func (c *Client) HandleCallback(ctx context.Context, code string) (*UserClaims, error) {
+// ExchangeCodeForToken exchanges an authorization code for tokens and returns user claims.
+// This is the primary method name that matches the interface.
+func (c *Client) ExchangeCodeForToken(ctx context.Context, code string) (*UserClaims, error) {
 	c.logger.Debug("Exchanging authorization code for tokens")
 
 	// Exchange authorization code for tokens
@@ -167,7 +168,7 @@ func (c *UserClaims) GetClaimValue(key string) string {
 	}
 }
 
-// ServeHTTP implements a simple health check for the OIDC provider
+// HealthCheck ServeHTTP implements a simple health check for the OIDC provider
 func (c *Client) HealthCheck(ctx context.Context) error {
 	// Try to fetch provider configuration
 	_, err := oidc.NewProvider(ctx, c.provider.Endpoint().AuthURL)

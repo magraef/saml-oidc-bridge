@@ -29,7 +29,7 @@ func (s *Server) securityHeadersMiddleware(next http.Handler) http.Handler {
 				"base-uri 'self'")
 
 		// Strict Transport Security (only if behind HTTPS)
-		if s.config.Session.CookieSecure {
+		if s.cookieSecure {
 			w.Header().Set("Strict-Transport-Security",
 				"max-age=31536000; includeSubDomains")
 		}
