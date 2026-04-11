@@ -113,9 +113,13 @@ func (i *IdP) GetRelayState(r *http.Request) string {
 func (i *IdP) CreateResponse(requestID, nameID string, attributes map[string]string) ([]byte, error) {
 	now := time.Now()
 
+	// Generate unique IDs for assertion and response
+	assertionID := fmt.Sprintf("_assertion_%d", now.UnixNano())
+	responseID := fmt.Sprintf("_response_%d", now.UnixNano()+1)
+
 	// Create assertion
 	assertion := saml.Assertion{
-		ID:           fmt.Sprintf("id-%d", now.UnixNano()),
+		ID:           assertionID,
 		IssueInstant: now,
 		Version:      "2.0",
 		Issuer: saml.Issuer{
@@ -194,7 +198,7 @@ func (i *IdP) CreateResponse(requestID, nameID string, attributes map[string]str
 
 	// Create response structure
 	response := &saml.Response{
-		ID:           fmt.Sprintf("id-%d", now.UnixNano()),
+		ID:           responseID,
 		InResponseTo: requestID,
 		Version:      "2.0",
 		IssueInstant: now,
