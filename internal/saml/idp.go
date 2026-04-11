@@ -123,8 +123,10 @@ func (i *IdP) CreateResponse(requestID, nameID string, attributes map[string]str
 		IssueInstant: now,
 		Version:      "2.0",
 		Issuer: saml.Issuer{
+			// Only set Format when it's the entity format (required for IdP issuer)
 			Format: "urn:oasis:names:tc:SAML:2.0:nameid-format:entity",
 			Value:  i.entityID,
+			// NameQualifier, SPNameQualifier, SPProvidedID are optional - omit to avoid empty attributes
 		},
 		Subject: &saml.Subject{
 			NameID: &saml.NameID{
@@ -138,6 +140,8 @@ func (i *IdP) CreateResponse(requestID, nameID string, attributes map[string]str
 						InResponseTo: requestID,
 						NotOnOrAfter: now.Add(5 * time.Minute),
 						Recipient:    i.spACSURL,
+						// NotBefore is optional and should be omitted to avoid zero value serialization
+						// Address is optional and should be omitted to avoid empty string serialization
 					},
 				},
 			},
@@ -174,6 +178,7 @@ func (i *IdP) CreateResponse(requestID, nameID string, attributes map[string]str
 			attrs = append(attrs, saml.Attribute{
 				Name:       name,
 				NameFormat: "urn:oasis:names:tc:SAML:2.0:attrname-format:basic",
+				// FriendlyName is optional - omit to avoid empty attribute in XML
 				Values: []saml.AttributeValue{
 					{
 						Type:  "xs:string",
@@ -196,7 +201,7 @@ func (i *IdP) CreateResponse(requestID, nameID string, attributes map[string]str
 		return nil, fmt.Errorf("failed to sign assertion: %w", err)
 	}
 
-	// Create response structure (omit Consent attribute per SAML spec)
+	// Create response structure
 	response := &saml.Response{
 		ID:           responseID,
 		InResponseTo: requestID,
@@ -205,31 +210,24 @@ func (i *IdP) CreateResponse(requestID, nameID string, attributes map[string]str
 		Destination:  i.spACSURL,
 		Issuer: &saml.Issuer{
 			Value: i.entityID,
+			// NameQualifier, SPNameQualifier, Format, SPProvidedID are optional - omit to avoid empty attributes
 		},
 		Status: saml.Status{
 			StatusCode: saml.StatusCode{
 				Value: "urn:oasis:names:tc:SAML:2.0:status:Success",
 			},
 		},
+		// Consent is optional - leave empty to omit from XML
 	}
 
-	// Marshal response to XML (without assertion)
-	responseXML, err := xml.Marshal(response)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal response: %w", err)
-	}
-
-	// Parse response XML into etree
-	responseDoc := etree.NewDocument()
-	if err := responseDoc.ReadFromBytes(responseXML); err != nil {
-		return nil, fmt.Errorf("failed to parse response XML: %w", err)
-	}
+	// The Element() method only adds attributes when they have non-empty values
+	responseElement := response.Element()
 
 	// Add signed assertion element to response
-	responseDoc.Root().AddChild(signedAssertionElement)
+	responseElement.AddChild(signedAssertionElement)
 
 	// Sign the response
-	signedResponseElement, err := i.signResponse(responseDoc.Root())
+	signedResponseElement, err := i.signResponse(responseElement)
 	if err != nil {
 		return nil, fmt.Errorf("failed to sign response: %w", err)
 	}
@@ -256,17 +254,8 @@ func (i *IdP) CreateResponse(requestID, nameID string, attributes map[string]str
 
 // signAssertion signs a SAML assertion and returns the signed XML element
 func (i *IdP) signAssertion(assertion *saml.Assertion) (*etree.Element, error) {
-	// Marshal assertion to XML
-	assertionXML, err := xml.Marshal(assertion)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal assertion: %w", err)
-	}
-
-	// Parse XML into etree document
-	doc := etree.NewDocument()
-	if err := doc.ReadFromBytes(assertionXML); err != nil {
-		return nil, fmt.Errorf("failed to parse assertion XML: %w", err)
-	}
+	// The Element() method only adds attributes when they have non-empty values
+	assertionElement := assertion.Element()
 
 	// Create key store
 	keyStore := dsig.TLSCertKeyStore{
@@ -278,8 +267,8 @@ func (i *IdP) signAssertion(assertion *saml.Assertion) (*etree.Element, error) {
 	signingContext := dsig.NewDefaultSigningContext(&keyStore)
 	signingContext.SetSignatureMethod(dsig.RSASHA256SignatureMethod)
 
-	// Sign the document - returns signed element
-	signedElement, err := signingContext.SignEnveloped(doc.Root())
+	// Sign the element directly - returns signed element
+	signedElement, err := signingContext.SignEnveloped(assertionElement)
 	if err != nil {
 		return nil, fmt.Errorf("failed to sign assertion: %w", err)
 	}
