@@ -1,12 +1,14 @@
 version: "2"
 sql:
   - engine: "sqlite"
-    queries: "internal/storage/schema.sql"
-    schema: "internal/storage/schema.sql"
+    queries:
+      - "./sql/queries.sql"
+      - "./sql/commands.sql"
+    schema: "./sql/schema.sql"
     gen:
       go:
         package: "storage"
-        out: "internal/storage"
+        out: "."
         emit_json_tags: true
         emit_prepared_queries: false
         emit_interface: true

@@ -9,7 +9,6 @@ import (
 )
 
 type Querier interface {
-	// Queries for sqlc
 	CreateSAMLRequest(ctx context.Context, arg CreateSAMLRequestParams) error
 	DeleteExpiredRequests(ctx context.Context, expiresAt int64) error
 	DeleteSAMLRequest(ctx context.Context, id string) error

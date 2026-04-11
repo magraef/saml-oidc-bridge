@@ -196,7 +196,7 @@ func (i *IdP) CreateResponse(requestID, nameID string, attributes map[string]str
 		return nil, fmt.Errorf("failed to sign assertion: %w", err)
 	}
 
-	// Create response structure
+	// Create response structure (omit Consent attribute per SAML spec)
 	response := &saml.Response{
 		ID:           responseID,
 		InResponseTo: requestID,
@@ -204,8 +204,7 @@ func (i *IdP) CreateResponse(requestID, nameID string, attributes map[string]str
 		IssueInstant: now,
 		Destination:  i.spACSURL,
 		Issuer: &saml.Issuer{
-			Format: "urn:oasis:names:tc:SAML:2.0:nameid-format:entity",
-			Value:  i.entityID,
+			Value: i.entityID,
 		},
 		Status: saml.Status{
 			StatusCode: saml.StatusCode{
