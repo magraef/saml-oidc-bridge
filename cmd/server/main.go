@@ -1,14 +1,18 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
 	"os/signal"
-	"saml-oidc-bridge/internal/server"
 	"syscall"
 
 	"saml-oidc-bridge/config"
+	"saml-oidc-bridge/internal/oidc"
+	"saml-oidc-bridge/internal/saml"
+	"saml-oidc-bridge/internal/server"
+	"saml-oidc-bridge/internal/storage"
 
 	"go.uber.org/zap"
 )
@@ -47,12 +51,81 @@ func main() {
 
 	logger.Info("Configuration loaded successfully")
 
-	// Create server
-	srv, err := server.NewServer(cfg, logger)
+	// Initialize dependencies
+	ctx := context.Background()
+
+	// Initialize OIDC client
+	oidcClient, err := oidc.NewClient(
+		ctx,
+		cfg.OIDC.IssuerURL,
+		cfg.OIDC.ClientID,
+		cfg.OIDC.ClientSecret,
+		cfg.OIDC.RedirectURL,
+		cfg.OIDC.Scopes,
+		logger,
+	)
 	if err != nil {
-		logger.Fatal("Failed to create server", zap.Error(err))
+		logger.Fatal("Failed to create OIDC client", zap.Error(err))
 	}
-	defer srv.Close()
+
+	// Create certificate provider based on configuration
+	var certProvider saml.CertificateProvider
+	if cfg.SAML.CertificatePath != "" && cfg.SAML.PrivateKeyPath != "" {
+		certProvider, err = saml.NewFilePathCertificateProvider(
+			cfg.SAML.CertificatePath,
+			cfg.SAML.PrivateKeyPath,
+			logger,
+		)
+		if err != nil {
+			logger.Fatal("Failed to create file-path certificate provider", zap.Error(err))
+		}
+	} else {
+		certProvider, err = saml.NewSelfSignedCertificateProvider(logger)
+		if err != nil {
+			logger.Fatal("Failed to create self-signed certificate provider", zap.Error(err))
+		}
+	}
+
+	// Initialize SAML IdP
+	samlIdP, err := saml.NewIdP(
+		cfg.SAML.EntityID,
+		cfg.SAML.ACSURL,
+		cfg.SP.EntityID,
+		cfg.SP.ACSURL,
+		certProvider,
+		logger,
+	)
+	if err != nil {
+		logger.Fatal("Failed to create SAML IdP", zap.Error(err))
+	}
+
+	// Initialize storage with migrations
+	store, err := storage.NewStore(cfg.Storage.DatabasePath, logger)
+	if err != nil {
+		logger.Fatal("Failed to create storage", zap.Error(err))
+	}
+	defer store.Close()
+
+	// Create claims mapper
+	claimsMapper := server.NewConfigClaimsMapper(&cfg.Mapping)
+
+	// Create server with all dependencies
+	srv := server.NewServer(
+		oidcClient,
+		samlIdP,
+		samlIdP,
+		samlIdP,
+		store,
+		store,
+		claimsMapper,
+		store,
+		logger,
+		cfg.Session.CookieName,
+		cfg.Session.CookieSecure,
+		cfg.SP.EntityID,
+		cfg.SP.ACSURL,
+		80, // Default SAML spec recommendation for max RelayState length
+	)
 
 	// Handle graceful shutdown
 	sigChan := make(chan os.Signal, 1)

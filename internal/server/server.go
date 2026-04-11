@@ -10,9 +10,7 @@ import (
 	"net/http"
 	"time"
 
-	"saml-oidc-bridge/config"
 	"saml-oidc-bridge/internal/oidc"
-	"saml-oidc-bridge/internal/saml"
 	"saml-oidc-bridge/internal/storage"
 
 	"go.uber.org/zap"
@@ -43,89 +41,9 @@ type sessionData struct {
 	State      string
 }
 
-// NewServer creates a new HTTP server with concrete implementations
-func NewServer(cfg *config.Config, logger *zap.Logger) (*Server, error) {
-	ctx := context.Background()
-
-	// Initialize OIDC client
-	oidcClient, err := oidc.NewClient(
-		ctx,
-		cfg.OIDC.IssuerURL,
-		cfg.OIDC.ClientID,
-		cfg.OIDC.ClientSecret,
-		cfg.OIDC.RedirectURL,
-		cfg.OIDC.Scopes,
-		logger,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create OIDC client: %w", err)
-	}
-
-	// Create certificate provider based on configuration
-	var certProvider saml.CertificateProvider
-	if cfg.SAML.CertificatePath != "" && cfg.SAML.PrivateKeyPath != "" {
-		certProvider, err = saml.NewFilePathCertificateProvider(
-			cfg.SAML.CertificatePath,
-			cfg.SAML.PrivateKeyPath,
-			logger,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create file-path certificate provider: %w", err)
-		}
-	} else {
-		certProvider, err = saml.NewSelfSignedCertificateProvider(logger)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create self-signed certificate provider: %w", err)
-		}
-	}
-
-	// Initialize SAML IdP
-	samlIdP, err := saml.NewIdP(
-		cfg.SAML.EntityID,
-		cfg.SAML.ACSURL,
-		cfg.SP.EntityID,
-		cfg.SP.ACSURL,
-		certProvider,
-		logger,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create SAML IdP: %w", err)
-	}
-
-	// Initialize storage with migrations
-	store, err := storage.NewStore(cfg.Storage.DatabasePath, logger)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create storage: %w", err)
-	}
-
-	// Create claims mapper
-	claimsMapper := NewConfigClaimsMapper(&cfg.Mapping)
-
-	logger.Info("Server initialized",
-		zap.String("address", cfg.Server.Address),
-		zap.String("database", cfg.Storage.DatabasePath),
-	)
-
-	return &Server{
-		oidcAuth:         oidcClient,
-		samlParser:       samlIdP,
-		samlResponder:    samlIdP,
-		samlMetadata:     samlIdP,
-		samlRequestStore: store,
-		requestCleaner:   store,
-		claimsMapper:     claimsMapper,
-		store:            store,
-		logger:           logger,
-		cookieName:       cfg.Session.CookieName,
-		cookieSecure:     cfg.Session.CookieSecure,
-		spEntityID:       cfg.SP.EntityID,
-		spACSURL:         cfg.SP.ACSURL,
-		maxRelayState:    80, // Default SAML spec recommendation
-	}, nil
-}
-
-// NewServerWithDependencies creates a new HTTP server with injected dependencies (for testing)
-func NewServerWithDependencies(
+// NewServer creates a new HTTP server with injected dependencies
+// Follows the pattern: Accept Interfaces, Return Instances
+func NewServer(
 	oidcAuth OIDCAuthenticator,
 	samlParser SAMLRequestParser,
 	samlResponder SAMLResponseCreator,

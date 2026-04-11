@@ -4,7 +4,7 @@ sql:
     queries:
       - "./sql/queries.sql"
       - "./sql/commands.sql"
-    schema: "./sql/schema.sql"
+    schema: "./migrations"
     gen:
       go:
         package: "storage"

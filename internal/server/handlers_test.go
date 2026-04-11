@@ -15,7 +15,7 @@ func TestHandleMetadata(t *testing.T) {
 	mockMetadata := &mockSAMLMetadata{}
 
 	// Create server with mocked dependencies
-	server := NewServerWithDependencies(
+	server := NewServer(
 		nil, // OIDC not needed for metadata
 		nil, // Parser not needed
 		nil, // Responder not needed
@@ -81,7 +81,7 @@ func TestHandleOIDCCallback_Success(t *testing.T) {
 	mockMapper := &mockClaimsMapper{}
 
 	// Create server with mocked dependencies
-	server := NewServerWithDependencies(
+	server := NewServer(
 		mockOIDC,
 		nil, // Parser not needed
 		mockResponder,
@@ -139,7 +139,7 @@ func TestHandleOIDCCallback_Success(t *testing.T) {
 
 func TestHandleHealth(t *testing.T) {
 	// Create minimal server
-	server := NewServerWithDependencies(
+	server := NewServer(
 		nil, nil, nil, nil, nil, nil, nil, nil,
 		zap.NewNop(),
 		"test-cookie",

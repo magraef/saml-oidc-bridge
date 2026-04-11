@@ -5,11 +5,18 @@ package storage
 import (
 	"context"
 	"database/sql"
+	"embed"
 	"fmt"
 
+	"github.com/golang-migrate/migrate/v4"
+	"github.com/golang-migrate/migrate/v4/database/sqlite3"
+	"github.com/golang-migrate/migrate/v4/source/iofs"
 	_ "github.com/mattn/go-sqlite3"
 	"go.uber.org/zap"
 )
+
+//go:embed migrations/*.sql
+var migrationsFS embed.FS
 
 // Store manages SQLite database connections and provides storage operations.
 type Store struct {
@@ -56,21 +63,29 @@ func NewStore(databasePath string, logger *zap.Logger) (*Store, error) {
 	return store, nil
 }
 
-// migrate runs database migrations.
+// migrate runs database migrations using golang-migrate.
 func (s *Store) migrate() error {
-	schema := `
-	CREATE TABLE IF NOT EXISTS saml_requests (
-		id TEXT PRIMARY KEY,
-		relay_state TEXT NOT NULL,
-		sp_acs_url TEXT NOT NULL,
-		created_at INTEGER NOT NULL,
-		expires_at INTEGER NOT NULL
-	);
-	CREATE INDEX IF NOT EXISTS idx_saml_requests_expires_at ON saml_requests(expires_at);
-	`
+	// Create source driver from embedded filesystem
+	sourceDriver, err := iofs.New(migrationsFS, "migrations")
+	if err != nil {
+		return fmt.Errorf("failed to create migration source: %w", err)
+	}
 
-	if _, err := s.db.Exec(schema); err != nil {
-		return fmt.Errorf("failed to create schema: %w", err)
+	// Create database driver
+	driver, err := sqlite3.WithInstance(s.db, &sqlite3.Config{})
+	if err != nil {
+		return fmt.Errorf("failed to create database driver: %w", err)
+	}
+
+	// Create migrate instance
+	m, err := migrate.NewWithInstance("iofs", sourceDriver, "sqlite3", driver)
+	if err != nil {
+		return fmt.Errorf("failed to create migrate instance: %w", err)
+	}
+
+	// Run migrations
+	if err := m.Up(); err != nil && err != migrate.ErrNoChange {
+		return fmt.Errorf("failed to run migrations: %w", err)
 	}
 
 	s.logger.Debug("Database schema migrated successfully")

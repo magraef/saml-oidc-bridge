@@ -223,18 +223,21 @@ func (i *IdP) CreateResponse(requestID, nameID string, attributes map[string]str
 	// The Element() method only adds attributes when they have non-empty values
 	responseElement := response.Element()
 
-	// Add signed assertion element to response
+	// Add the signed assertion element to the response
+	// According to SAML 2.0 schema (ResponseType), the order must be:
+	// 1. Issuer (from StatusResponseType, already added by Element())
+	// 2. Signature (from StatusResponseType, optional - we skip this)
+	// 3. Extensions (from StatusResponseType, optional - we don't use)
+	// 4. Status (from StatusResponseType, already added by Element())
+	// 5. Assertion/EncryptedAssertion (from ResponseType - we add this)
+	//
+	// Note: We only sign the Assertion, not the Response itself.
+	// This is a common and valid SAML 2.0 pattern.
 	responseElement.AddChild(signedAssertionElement)
-
-	// Sign the response
-	signedResponseElement, err := i.signResponse(responseElement)
-	if err != nil {
-		return nil, fmt.Errorf("failed to sign response: %w", err)
-	}
 
 	// Create final document
 	finalDoc := etree.NewDocument()
-	finalDoc.SetRoot(signedResponseElement)
+	finalDoc.SetRoot(responseElement)
 
 	// Convert to XML bytes
 	signedXML, err := finalDoc.WriteToBytes()
@@ -267,10 +270,42 @@ func (i *IdP) signAssertion(assertion *saml.Assertion) (*etree.Element, error) {
 	signingContext := dsig.NewDefaultSigningContext(&keyStore)
 	signingContext.SetSignatureMethod(dsig.RSASHA256SignatureMethod)
 
-	// Sign the element directly - returns signed element
+	// Sign the element - this appends signature at the end
 	signedElement, err := signingContext.SignEnveloped(assertionElement)
 	if err != nil {
 		return nil, fmt.Errorf("failed to sign assertion: %w", err)
+	}
+
+	// According to SAML 2.0 AssertionType schema, Signature must come after Issuer and before Subject
+	// SignEnveloped appends it at the end, so we need to manually reorder
+
+	// Collect all children and find Signature
+	var signatureElement *etree.Element
+	var otherChildren []*etree.Element
+
+	for _, child := range signedElement.ChildElements() {
+		if child.Tag == "Signature" {
+			signatureElement = child
+		} else {
+			otherChildren = append(otherChildren, child)
+		}
+	}
+
+	// If signature found, rebuild element with correct order
+	if signatureElement != nil && len(otherChildren) > 0 {
+		// Clear all children
+		signedElement.Child = []etree.Token{}
+
+		// Add children in correct order: Issuer first, then Signature, then rest
+		addedSignature := false
+		for _, child := range otherChildren {
+			signedElement.AddChild(child)
+			// Add signature after Issuer
+			if !addedSignature && child.Tag == "Issuer" {
+				signedElement.AddChild(signatureElement)
+				addedSignature = true
+			}
+		}
 	}
 
 	i.logger.Debug("Assertion signed successfully",
