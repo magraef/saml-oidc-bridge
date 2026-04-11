@@ -279,38 +279,46 @@ func (i *IdP) signAssertion(assertion *saml.Assertion) (*etree.Element, error) {
 	// According to SAML 2.0 AssertionType schema, Signature must come after Issuer and before Subject
 	// SignEnveloped appends it at the end, so we need to manually reorder
 
-	// Collect all children and find Signature
+	// Find Signature element and its index
 	var signatureElement *etree.Element
-	var otherChildren []*etree.Element
+	var signatureIndex int = -1
 
-	for _, child := range signedElement.ChildElements() {
+	for i, child := range signedElement.ChildElements() {
 		if child.Tag == "Signature" {
 			signatureElement = child
-		} else {
-			otherChildren = append(otherChildren, child)
+			signatureIndex = i
+			break
 		}
 	}
 
-	// If signature found, rebuild element with correct order
-	if signatureElement != nil && len(otherChildren) > 0 {
-		// Clear all children
-		signedElement.Child = []etree.Token{}
-
-		// Add children in correct order: Issuer first, then Signature, then rest
-		addedSignature := false
-		for _, child := range otherChildren {
-			signedElement.AddChild(child)
-			// Add signature after Issuer
-			if !addedSignature && child.Tag == "Issuer" {
-				signedElement.AddChild(signatureElement)
-				addedSignature = true
+	// If signature found, move it to correct position (after Issuer)
+	if signatureElement != nil && signatureIndex > 0 {
+		// Find Issuer index
+		issuerIndex := -1
+		for i, child := range signedElement.ChildElements() {
+			if child.Tag == "Issuer" {
+				issuerIndex = i
+				break
 			}
 		}
+
+		// If Issuer found and Signature is not already right after it
+		if issuerIndex >= 0 && signatureIndex != issuerIndex+1 {
+			// Remove signature from current position
+			signedElement.RemoveChildAt(signatureIndex)
+
+			// Insert signature right after Issuer
+			// Note: After removal, indices shift, so we insert at issuerIndex+1
+			signedElement.InsertChildAt(issuerIndex+1, signatureElement)
+		}
 	}
 
+	// Debug: Log element structure
 	i.logger.Debug("Assertion signed successfully",
 		zap.String("assertion_id", assertion.ID),
 		zap.String("signature_method", "RSA-SHA256"),
+		zap.Bool("signature_present", signatureElement != nil),
+		zap.Int("child_count", len(signedElement.ChildElements())),
 	)
 
 	return signedElement, nil
