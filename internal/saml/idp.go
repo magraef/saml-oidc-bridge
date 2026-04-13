@@ -270,54 +270,18 @@ func (i *IdP) signAssertion(assertion *saml.Assertion) (*etree.Element, error) {
 	signingContext := dsig.NewDefaultSigningContext(&keyStore)
 	signingContext.SetSignatureMethod(dsig.RSASHA256SignatureMethod)
 
-	// Sign the element - this appends signature at the end
+	// Sign the element - this computes the signature and appends it
+	// NOTE: We leave the signature at the end (where SignEnveloped places it)
+	// Moving it after signing would invalidate the signature
+	// Most SAML implementations accept signatures at the end of the Assertion
 	signedElement, err := signingContext.SignEnveloped(assertionElement)
 	if err != nil {
 		return nil, fmt.Errorf("failed to sign assertion: %w", err)
 	}
 
-	// According to SAML 2.0 AssertionType schema, Signature must come after Issuer and before Subject
-	// SignEnveloped appends it at the end, so we need to manually reorder
-
-	// Find Signature element and its index
-	var signatureElement *etree.Element
-	var signatureIndex int = -1
-
-	for i, child := range signedElement.ChildElements() {
-		if child.Tag == "Signature" {
-			signatureElement = child
-			signatureIndex = i
-			break
-		}
-	}
-
-	// If signature found, move it to correct position (after Issuer)
-	if signatureElement != nil && signatureIndex > 0 {
-		// Find Issuer index
-		issuerIndex := -1
-		for i, child := range signedElement.ChildElements() {
-			if child.Tag == "Issuer" {
-				issuerIndex = i
-				break
-			}
-		}
-
-		// If Issuer found and Signature is not already right after it
-		if issuerIndex >= 0 && signatureIndex != issuerIndex+1 {
-			// Remove signature from current position
-			signedElement.RemoveChildAt(signatureIndex)
-
-			// Insert signature right after Issuer
-			// Note: After removal, indices shift, so we insert at issuerIndex+1
-			signedElement.InsertChildAt(issuerIndex+1, signatureElement)
-		}
-	}
-
-	// Debug: Log element structure
 	i.logger.Debug("Assertion signed successfully",
 		zap.String("assertion_id", assertion.ID),
 		zap.String("signature_method", "RSA-SHA256"),
-		zap.Bool("signature_present", signatureElement != nil),
 		zap.Int("child_count", len(signedElement.ChildElements())),
 	)
 
