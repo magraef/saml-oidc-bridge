@@ -14,16 +14,16 @@ func TestStoreMigrations(t *testing.T) {
 	defer os.Remove(tmpDB)
 
 	logger := zap.NewNop()
+	ctx := context.Background()
 
 	// Create store - this should run migrations
-	store, err := NewStore(tmpDB, logger)
+	store, err := NewStore(ctx, tmpDB, logger)
 	if err != nil {
 		t.Fatalf("Failed to create store: %v", err)
 	}
 	defer store.Close()
 
 	// Verify table exists by trying to insert data
-	ctx := context.Background()
 	err = store.StoreSAMLRequest(ctx, "test-id", "test-relay", "https://test.example.com/acs")
 	if err != nil {
 		t.Fatalf("Failed to store SAML request: %v", err)
@@ -62,23 +62,23 @@ func TestStoreMigrationsIdempotent(t *testing.T) {
 	defer os.Remove(tmpDB)
 
 	logger := zap.NewNop()
+	ctx := context.Background()
 
 	// Create store first time
-	store1, err := NewStore(tmpDB, logger)
+	store1, err := NewStore(ctx, tmpDB, logger)
 	if err != nil {
 		t.Fatalf("Failed to create store first time: %v", err)
 	}
 	store1.Close()
 
 	// Create store second time - migrations should be idempotent
-	store2, err := NewStore(tmpDB, logger)
+	store2, err := NewStore(ctx, tmpDB, logger)
 	if err != nil {
 		t.Fatalf("Failed to create store second time: %v", err)
 	}
 	defer store2.Close()
 
 	// Verify store works after reopening
-	ctx := context.Background()
 	err = store2.StoreSAMLRequest(ctx, "test-id-2", "test-relay-2", "https://test2.example.com/acs")
 	if err != nil {
 		t.Fatalf("Failed to store SAML request after reopening: %v", err)

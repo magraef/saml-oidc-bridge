@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -15,13 +16,14 @@ func TestHandleMetadata(t *testing.T) {
 	mockMetadata := &mockSAMLMetadata{}
 
 	// Create server with mocked dependencies
+	ctx := context.Background()
 	server := NewServer(
+		ctx,
 		nil, // OIDC not needed for metadata
 		nil, // Parser not needed
 		nil, // Responder not needed
 		mockMetadata,
 		nil, // Request store not needed
-		nil, // Cleaner not needed
 		nil, // Claims mapper not needed
 		nil, // DB not needed
 		zap.NewNop(),
@@ -81,13 +83,14 @@ func TestHandleOIDCCallback_Success(t *testing.T) {
 	mockMapper := &mockClaimsMapper{}
 
 	// Create server with mocked dependencies
+	ctx := context.Background()
 	server := NewServer(
+		ctx,
 		mockOIDC,
 		nil, // Parser not needed
 		mockResponder,
 		nil, // Metadata not needed
 		mockStore,
-		nil, // Cleaner not needed
 		mockMapper,
 		nil,
 		zap.NewNop(),
@@ -139,8 +142,10 @@ func TestHandleOIDCCallback_Success(t *testing.T) {
 
 func TestHandleHealth(t *testing.T) {
 	// Create minimal server
+	ctx := context.Background()
 	server := NewServer(
-		nil, nil, nil, nil, nil, nil, nil, nil,
+		ctx,
+		nil, nil, nil, nil, nil, nil, nil,
 		zap.NewNop(),
 		"test-cookie",
 		false,

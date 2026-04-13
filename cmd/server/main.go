@@ -51,8 +51,9 @@ func main() {
 
 	logger.Info("Configuration loaded successfully")
 
-	// Initialize dependencies
-	ctx := context.Background()
+	// Initialize dependencies with cancellable context for graceful shutdown
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
 	// Initialize OIDC client
 	oidcClient, err := oidc.NewClient(
@@ -99,8 +100,8 @@ func main() {
 		logger.Fatal("Failed to create SAML IdP", zap.Error(err))
 	}
 
-	// Initialize storage with migrations
-	store, err := storage.NewStore(cfg.Storage.DatabasePath, logger)
+	// Initialize storage with migrations and cleanup goroutine
+	store, err := storage.NewStore(ctx, cfg.Storage.DatabasePath, logger)
 	if err != nil {
 		logger.Fatal("Failed to create storage", zap.Error(err))
 	}
@@ -111,11 +112,11 @@ func main() {
 
 	// Create server with all dependencies
 	srv := server.NewServer(
+		ctx,
 		oidcClient,
 		samlIdP,
 		samlIdP,
 		samlIdP,
-		store,
 		store,
 		claimsMapper,
 		store,
@@ -126,17 +127,19 @@ func main() {
 		cfg.SP.ACSURL,
 		80, // Default SAML spec recommendation for max RelayState length
 	)
+	defer srv.Close()
 
 	// Handle graceful shutdown
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
+	// Start server in goroutine
 	errChan := make(chan error, 1)
 	go func() {
-		errChan <- srv.Start(cfg.Server.Address)
+		errChan <- srv.Start(ctx, cfg.Server.Address)
 	}()
 
-	// Wait for shutdown signal or error
+	// Wait for shutdown signal or server error
 	select {
 	case err := <-errChan:
 		if err != nil {
@@ -144,7 +147,15 @@ func main() {
 		}
 	case sig := <-sigChan:
 		logger.Info("Received shutdown signal", zap.String("signal", sig.String()))
+
+		// Cancel context to trigger graceful shutdown
+		cancel()
+
+		// Wait for server to finish shutting down
+		if err := <-errChan; err != nil {
+			logger.Error("Server shutdown error", zap.Error(err))
+		}
 	}
 
-	logger.Info("Shutting down gracefully")
+	logger.Info("Shutdown complete")
 }

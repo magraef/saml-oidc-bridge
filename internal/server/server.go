@@ -23,7 +23,6 @@ type Server struct {
 	samlResponder    SAMLResponseCreator
 	samlMetadata     SAMLMetadataProvider
 	samlRequestStore SAMLRequestStore
-	requestCleaner   ExpiredRequestCleaner
 	claimsMapper     ClaimsMapper
 	store            *storage.Store
 	logger           *zap.Logger
@@ -32,6 +31,7 @@ type Server struct {
 	spEntityID       string
 	spACSURL         string
 	maxRelayState    int
+	cancel           context.CancelFunc
 }
 
 // sessionData represents data stored in the session cookie
@@ -43,13 +43,14 @@ type sessionData struct {
 
 // NewServer creates a new HTTP server with injected dependencies
 // Follows the pattern: Accept Interfaces, Return Instances
+// It accepts a context that will be used to manage the server lifecycle.
 func NewServer(
+	ctx context.Context,
 	oidcAuth OIDCAuthenticator,
 	samlParser SAMLRequestParser,
 	samlResponder SAMLResponseCreator,
 	samlMetadata SAMLMetadataProvider,
 	samlRequestStore SAMLRequestStore,
-	requestCleaner ExpiredRequestCleaner,
 	claimsMapper ClaimsMapper,
 	store *storage.Store,
 	logger *zap.Logger,
@@ -59,13 +60,14 @@ func NewServer(
 	spACSURL string,
 	maxRelayState int,
 ) *Server {
+	_, cancel := context.WithCancel(ctx)
+
 	return &Server{
 		oidcAuth:         oidcAuth,
 		samlParser:       samlParser,
 		samlResponder:    samlResponder,
 		samlMetadata:     samlMetadata,
 		samlRequestStore: samlRequestStore,
-		requestCleaner:   requestCleaner,
 		claimsMapper:     claimsMapper,
 		store:            store,
 		logger:           logger,
@@ -74,11 +76,12 @@ func NewServer(
 		spEntityID:       spEntityID,
 		spACSURL:         spACSURL,
 		maxRelayState:    maxRelayState,
+		cancel:           cancel,
 	}
 }
 
-// Start starts the HTTP server
-func (s *Server) Start(address string) error {
+// Handler returns the HTTP handler for the server
+func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
 	// Register handlers
@@ -88,20 +91,45 @@ func (s *Server) Start(address string) error {
 	mux.HandleFunc("/metadata", s.handleMetadata)
 	mux.HandleFunc("/healthz", s.handleHealth)
 
-	// Start cleanup goroutine
-	go s.cleanupExpiredRequests()
+	return s.securityHeadersMiddleware(s.loggingMiddleware(mux))
+}
 
-	s.logger.Info("Starting HTTP server", zap.String("address", address))
-
+// Start starts the HTTP server and blocks until shutdown
+func (s *Server) Start(ctx context.Context, address string) error {
 	server := &http.Server{
 		Addr:         address,
-		Handler:      s.securityHeadersMiddleware(s.loggingMiddleware(mux)),
+		Handler:      s.Handler(),
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 15 * time.Second,
 		IdleTimeout:  60 * time.Second,
 	}
 
-	return server.ListenAndServe()
+	// Start server in goroutine
+	errChan := make(chan error, 1)
+	go func() {
+		s.logger.Info("HTTP server listening", zap.String("address", address))
+		errChan <- server.ListenAndServe()
+	}()
+
+	// Wait for context cancellation or server error
+	select {
+	case <-ctx.Done():
+		s.logger.Info("Shutting down HTTP server")
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			s.logger.Error("Server shutdown error", zap.Error(err))
+			return err
+		}
+		s.logger.Info("HTTP server stopped")
+		return nil
+	case err := <-errChan:
+		if err != nil && err != http.ErrServerClosed {
+			return err
+		}
+		return nil
+	}
 }
 
 // handleSAMLLogin handles the SAML login initiation
@@ -408,25 +436,16 @@ func (s *Server) renderSAMLResponse(w http.ResponseWriter, acsURL, samlResponse,
 	}
 }
 
-// cleanupExpiredRequests periodically removes expired SAML requests
-func (s *Server) cleanupExpiredRequests() {
-	ticker := time.NewTicker(5 * time.Minute)
-	defer ticker.Stop()
-
-	for range ticker.C {
-		ctx := context.Background()
-		now := time.Now().Unix()
-
-		if err := s.requestCleaner.CleanupExpired(ctx, now); err != nil {
-			s.logger.Error("Failed to cleanup expired requests", zap.Error(err))
-		} else {
-			s.logger.Debug("Cleaned up expired requests")
-		}
-	}
-}
-
 // Close closes the server resources
 func (s *Server) Close() error {
+	s.logger.Debug("Shutting down server")
+
+	// Cancel server context
+	if s.cancel != nil {
+		s.cancel()
+	}
+
+	// Close store (which will stop cleanup goroutine)
 	if s.store != nil {
 		return s.store.Close()
 	}

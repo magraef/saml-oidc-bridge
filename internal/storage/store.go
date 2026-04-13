@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"embed"
 	"fmt"
+	"time"
 
 	"github.com/golang-migrate/migrate/v4"
 	"github.com/golang-migrate/migrate/v4/database/sqlite3"
@@ -23,10 +24,12 @@ type Store struct {
 	db      *sql.DB
 	queries *Queries
 	logger  *zap.Logger
+	cancel  context.CancelFunc
 }
 
 // NewStore creates a new Store with initialized database and schema.
-func NewStore(databasePath string, logger *zap.Logger) (*Store, error) {
+// It accepts a context that will be used to manage the cleanup goroutine lifecycle.
+func NewStore(ctx context.Context, databasePath string, logger *zap.Logger) (*Store, error) {
 	// Open database connection
 	db, err := sql.Open("sqlite", databasePath)
 	if err != nil {
@@ -43,14 +46,19 @@ func NewStore(databasePath string, logger *zap.Logger) (*Store, error) {
 		return nil, fmt.Errorf("failed to ping database: %w", err)
 	}
 
+	// Create cancellable context for cleanup goroutine
+	cleanupCtx, cancel := context.WithCancel(ctx)
+
 	store := &Store{
 		db:      db,
 		queries: New(db),
 		logger:  logger,
+		cancel:  cancel,
 	}
 
 	// Run migrations
 	if err := store.migrate(); err != nil {
+		cancel()
 		db.Close()
 		return nil, fmt.Errorf("failed to migrate database: %w", err)
 	}
@@ -59,6 +67,9 @@ func NewStore(databasePath string, logger *zap.Logger) (*Store, error) {
 		zap.String("database", databasePath),
 		zap.String("driver", "sqlite"),
 	)
+
+	// Start cleanup goroutine
+	go store.cleanupExpiredRequests(cleanupCtx)
 
 	return store, nil
 }
@@ -120,8 +131,43 @@ func (s *Store) CleanupExpired(ctx context.Context, expiryTime int64) error {
 	return s.queries.DeleteExpiredRequests(ctx, expiryTime)
 }
 
-// Close closes the database connection.
+// cleanupExpiredRequests periodically removes expired SAML requests.
+func (s *Store) cleanupExpiredRequests(ctx context.Context) {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+
+	s.logger.Debug("Started cleanup goroutine for expired SAML requests")
+
+	for {
+		select {
+		case <-ctx.Done():
+			s.logger.Debug("Cleanup goroutine stopped")
+			return
+		case <-ticker.C:
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			now := time.Now().Unix()
+
+			if err := s.CleanupExpired(cleanupCtx, now); err != nil {
+				s.logger.Error("Failed to cleanup expired requests", zap.Error(err))
+			} else {
+				s.logger.Debug("Cleaned up expired requests")
+			}
+			cancel()
+		}
+	}
+}
+
+// Close gracefully shuts down the store by stopping the cleanup goroutine
+// and closing the database connection.
 func (s *Store) Close() error {
+	s.logger.Debug("Shutting down storage")
+
+	// Stop cleanup goroutine
+	if s.cancel != nil {
+		s.cancel()
+	}
+
+	// Close database connection
 	if s.db != nil {
 		s.logger.Debug("Closing database connection")
 		return s.db.Close()
