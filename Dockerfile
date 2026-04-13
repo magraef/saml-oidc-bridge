@@ -24,8 +24,14 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
 # Create minimal passwd file for non-root user
 RUN echo "nonroot:x:65532:65532:nonroot:/:/sbin/nologin" > /tmp/passwd
 
+# Create empty directory structure for scratch image
+RUN mkdir -p /tmp/data
+
 # Final stage - using scratch (minimal possible image)
 FROM scratch
+
+# Create directory structure by copying empty dirs from builder
+COPY --from=builder /tmp/data /data
 
 WORKDIR /app
 
