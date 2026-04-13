@@ -64,7 +64,8 @@ type ServerConfig struct {
 
 // StorageConfig contains database settings
 type StorageConfig struct {
-	DatabasePath string `env:"STORAGE_DATABASE_PATH" envDefault:"./saml-oidc-bridge.db"`
+	DatabasePath  string `env:"STORAGE_DATABASE_PATH" envDefault:"./saml-oidc-bridge.db"`
+	EncryptionKey string `env:"STORAGE_ENCRYPTION_KEY"` // 32-byte hex-encoded key for AES-256
 }
 
 // Load reads configuration from .env file (if exists) and environment variables
@@ -123,6 +124,13 @@ func Load(envPath string) (*Config, error) {
 	// Handle Port override for Address if Port is set
 	if cfg.Server.Port > 0 {
 		cfg.Server.Address = fmt.Sprintf(":%d", cfg.Server.Port)
+	}
+
+	// Parse and validate encryption key if provided
+	if cfg.Storage.EncryptionKey != "" {
+		if err := validateEncryptionKey(cfg.Storage.EncryptionKey); err != nil {
+			return nil, fmt.Errorf("invalid encryption key: %w", err)
+		}
 	}
 
 	// Validate configuration
@@ -194,6 +202,23 @@ func (c *Config) Validate() error {
 
 	if c.Session.CookieSecret == "" {
 		return fmt.Errorf("SESSION_COOKIE_SECRET is required")
+	}
+
+	return nil
+}
+
+// validateEncryptionKey validates that the encryption key is a valid 32-byte hex string
+func validateEncryptionKey(key string) error {
+	// Key should be 64 hex characters (32 bytes)
+	if len(key) != 64 {
+		return fmt.Errorf("encryption key must be 64 hex characters (32 bytes), got %d", len(key))
+	}
+
+	// Validate hex characters
+	for _, c := range key {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return fmt.Errorf("encryption key must contain only hexadecimal characters")
+		}
 	}
 
 	return nil

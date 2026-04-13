@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"flag"
 	"fmt"
 	"os"
@@ -100,8 +101,17 @@ func main() {
 		logger.Fatal("Failed to create SAML IdP", zap.Error(err))
 	}
 
+	// Parse encryption key if provided
+	var encryptionKey []byte
+	if cfg.Storage.EncryptionKey != "" {
+		encryptionKey, err = parseEncryptionKey(cfg.Storage.EncryptionKey)
+		if err != nil {
+			logger.Fatal("Failed to parse encryption key", zap.Error(err))
+		}
+	}
+
 	// Initialize storage with migrations and cleanup goroutine
-	store, err := storage.NewStore(ctx, cfg.Storage.DatabasePath, logger)
+	store, err := storage.NewStore(ctx, cfg.Storage.DatabasePath, encryptionKey, logger)
 	if err != nil {
 		logger.Fatal("Failed to create storage", zap.Error(err))
 	}
@@ -158,4 +168,16 @@ func main() {
 	}
 
 	logger.Info("Shutdown complete")
+}
+
+// parseEncryptionKey converts a hex-encoded string to a 32-byte key
+func parseEncryptionKey(hexKey string) ([]byte, error) {
+	key, err := hex.DecodeString(hexKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode hex key: %w", err)
+	}
+	if len(key) != 32 {
+		return nil, fmt.Errorf("encryption key must be 32 bytes, got %d", len(key))
+	}
+	return key, nil
 }

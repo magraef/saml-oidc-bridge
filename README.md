@@ -16,6 +16,8 @@ It bridges the gap between SAML-based applications and modern OAuth2/OIDC identi
 - ✅ Single OIDC provider integration
 - ✅ Signed SAML assertions
 - ✅ Configurable attribute mapping
+- ✅ SAML Single Logout (SLO) support
+- ✅ **AES-256-GCM encryption** for ID tokens at rest
 - ✅ Stateless session management
 - ✅ SQLite-based request tracking
 - ✅ Structured logging with zap
@@ -83,6 +85,20 @@ DEBUG=false
 
 # Storage Configuration
 STORAGE_DATABASE_PATH=./saml-oidc-bridge.db
+
+# Security: ID Token Encryption (RECOMMENDED for production)
+# Generate with: openssl rand -hex 32
+# STORAGE_ENCRYPTION_KEY=your-64-character-hex-key-here
+```
+
+**Important Security Note:** For production deployments, it's **highly recommended** to enable ID token encryption. See [ENCRYPTION.md](.docs/ENCRYPTION.md) for details.
+
+```bash
+# Generate encryption key
+openssl rand -hex 32
+
+# Add to .env
+echo "STORAGE_ENCRYPTION_KEY=$(openssl rand -hex 32)" >> .env
 ```
 
 ### 2. Certificates (Optional for Development)
@@ -582,13 +598,20 @@ All configuration can be provided via environment variables (takes precedence ov
 
 **SP**: `SP_ENTITY_ID`, `SP_ACS_URL`
 
+**Storage**: `STORAGE_DATABASE_PATH`, `STORAGE_ENCRYPTION_KEY` (32-byte hex key for AES-256-GCM encryption)
+
 **Mapping**: `MAPPING_NAME_ID`, `MAPPING_ATTR_<NAME>=<value>` (e.g., `MAPPING_ATTR_EMAIL=email`)
 
 **Session**: `SESSION_COOKIE_SECRET`, `SESSION_COOKIE_SECURE`, `SESSION_COOKIE_NAME`
 
 **Server**: `SERVER_ADDRESS` or `PORT`
 
-**Storage**: `STORAGE_DATABASE_PATH`
+## Documentation
+
+- **[ENCRYPTION.md](.docs/ENCRYPTION.md)** - ID token encryption guide and security best practices
+- **[LOGOUT-IMPLEMENTATION.md](.docs/LOGOUT-IMPLEMENTATION.md)** - SAML Single Logout implementation details
+- **[SECURITY.md](.docs/SECURITY.md)** - Security hardening guide
+- **[ARCHITECTURE.md](.docs/ARCHITECTURE.md)** - System architecture and design
 
 ## Support
 

@@ -21,15 +21,17 @@ var migrationsFS embed.FS
 
 // Store manages SQLite database connections and provides storage operations.
 type Store struct {
-	db      *sql.DB
-	queries *Queries
-	logger  *zap.Logger
-	cancel  context.CancelFunc
+	db        *sql.DB
+	queries   *Queries
+	logger    *zap.Logger
+	cancel    context.CancelFunc
+	encryptor *Encryptor
 }
 
 // NewStore creates a new Store with initialized database and schema.
 // It accepts a context that will be used to manage the cleanup goroutine lifecycle.
-func NewStore(ctx context.Context, databasePath string, logger *zap.Logger) (*Store, error) {
+// encryptionKey must be 32 bytes for AES-256, or nil to disable encryption.
+func NewStore(ctx context.Context, databasePath string, encryptionKey []byte, logger *zap.Logger) (*Store, error) {
 	// Open database connection
 	db, err := sql.Open("sqlite", databasePath)
 	if err != nil {
@@ -49,11 +51,26 @@ func NewStore(ctx context.Context, databasePath string, logger *zap.Logger) (*St
 	// Create cancellable context for cleanup goroutine
 	cleanupCtx, cancel := context.WithCancel(ctx)
 
+	// Initialize encryptor if key is provided
+	var encryptor *Encryptor
+	if encryptionKey != nil {
+		encryptor, err = NewEncryptor(encryptionKey)
+		if err != nil {
+			cancel()
+			db.Close()
+			return nil, fmt.Errorf("failed to create encryptor: %w", err)
+		}
+		logger.Info("Encryption enabled for sensitive data")
+	} else {
+		logger.Warn("Encryption disabled - ID tokens will be stored in plaintext")
+	}
+
 	store := &Store{
-		db:      db,
-		queries: New(db),
-		logger:  logger,
-		cancel:  cancel,
+		db:        db,
+		queries:   New(db),
+		logger:    logger,
+		cancel:    cancel,
+		encryptor: encryptor,
 	}
 
 	// Run migrations
@@ -131,14 +148,36 @@ func (s *Store) CleanupExpired(ctx context.Context, expiryTime int64) error {
 	return s.queries.DeleteExpiredRequests(ctx, expiryTime)
 }
 
-// CreateSession stores a new session
+// CreateSession stores a new session with encrypted ID token
 func (s *Store) CreateSession(ctx context.Context, arg CreateSessionParams) error {
+	// Encrypt ID token if encryptor is available
+	if s.encryptor != nil && arg.IDToken != "" {
+		encrypted, err := s.encryptor.Encrypt(arg.IDToken)
+		if err != nil {
+			return fmt.Errorf("failed to encrypt ID token: %w", err)
+		}
+		arg.IDToken = encrypted
+	}
 	return s.queries.CreateSession(ctx, arg)
 }
 
-// GetSession retrieves a session by session index
+// GetSession retrieves a session by session index and decrypts the ID token
 func (s *Store) GetSession(ctx context.Context, sessionIndex string) (Session, error) {
-	return s.queries.GetSession(ctx, sessionIndex)
+	session, err := s.queries.GetSession(ctx, sessionIndex)
+	if err != nil {
+		return Session{}, err
+	}
+
+	// Decrypt ID token if encryptor is available
+	if s.encryptor != nil && session.IDToken != "" {
+		decrypted, err := s.encryptor.Decrypt(session.IDToken)
+		if err != nil {
+			return Session{}, fmt.Errorf("failed to decrypt ID token: %w", err)
+		}
+		session.IDToken = decrypted
+	}
+
+	return session, nil
 }
 
 // DeleteSession removes a session
