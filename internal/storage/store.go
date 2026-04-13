@@ -11,8 +11,8 @@ import (
 	"github.com/golang-migrate/migrate/v4"
 	"github.com/golang-migrate/migrate/v4/database/sqlite3"
 	"github.com/golang-migrate/migrate/v4/source/iofs"
-	_ "github.com/mattn/go-sqlite3"
 	"go.uber.org/zap"
+	_ "modernc.org/sqlite"
 )
 
 //go:embed migrations/*.sql
@@ -28,7 +28,7 @@ type Store struct {
 // NewStore creates a new Store with initialized database and schema.
 func NewStore(databasePath string, logger *zap.Logger) (*Store, error) {
 	// Open database connection
-	db, err := sql.Open("sqlite3", databasePath)
+	db, err := sql.Open("sqlite", databasePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
@@ -57,7 +57,7 @@ func NewStore(databasePath string, logger *zap.Logger) (*Store, error) {
 
 	logger.Info("Storage initialized",
 		zap.String("database", databasePath),
-		zap.String("driver", "sqlite3"),
+		zap.String("driver", "sqlite"),
 	)
 
 	return store, nil
