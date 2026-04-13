@@ -161,21 +161,36 @@ func TestSAMLResponseAgainstSchema(t *testing.T) {
 		}
 	}
 
-	// Note: We skip strict XSD schema validation because:
-	// 1. The SAML 2.0 XSD requires Signature after Issuer, before Subject
-	// 2. The dsig library (SignEnveloped) places signature at the end
-	// 3. Moving signature after signing invalidates it (breaks cryptographic signature)
-	// 4. Most SAML SPs (including major ones) accept signatures at the end of assertions
-	// 5. This is a common and valid SAML implementation pattern
-	//
-	// The signature placement at the end is functionally correct and widely accepted,
-	// even though it doesn't match the strict schema ordering preference.
+	// Validate against SAML 2.0 protocol schema
+	protocolSchemaPath := filepath.Join(schemaDir, "saml-schema-protocol-2.0.xsd")
 
-	t.Logf("Schema validation skipped - signature at end of assertion is valid and widely accepted")
+	// Run xmllint validation
+	cmd := exec.Command("xmllint", "--noout", "--schema", protocolSchemaPath, tmpFile.Name())
+	output, err := cmd.CombinedOutput()
 
-	// Verify signature is present
+	if err != nil {
+		t.Errorf("Schema validation failed: %v\nOutput: %s", err, string(output))
+	} else {
+		t.Logf("Schema validation passed successfully")
+	}
+
+	// Verify signature is present and positioned correctly (after Issuer, before Subject)
 	if !strings.Contains(fullXML, "<ds:Signature") {
 		t.Error("Signature element not found in SAML response")
+	}
+
+	// Verify the signature appears after Issuer and before Subject
+	issuerPos := strings.Index(fullXML, "<saml:Issuer")
+	signaturePos := strings.Index(fullXML, "<ds:Signature")
+	subjectPos := strings.Index(fullXML, "<saml:Subject")
+
+	if issuerPos == -1 || signaturePos == -1 || subjectPos == -1 {
+		t.Error("Required elements (Issuer, Signature, Subject) not found")
+	} else if !(issuerPos < signaturePos && signaturePos < subjectPos) {
+		t.Errorf("Signature not positioned correctly: Issuer at %d, Signature at %d, Subject at %d",
+			issuerPos, signaturePos, subjectPos)
+	} else {
+		t.Logf("Signature correctly positioned: Issuer -> Signature -> Subject")
 	}
 
 	// Verify basic structure

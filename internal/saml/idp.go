@@ -257,7 +257,8 @@ func (i *IdP) CreateResponse(requestID, nameID string, attributes map[string]str
 
 // signAssertion signs a SAML assertion and returns the signed XML element
 func (i *IdP) signAssertion(assertion *saml.Assertion) (*etree.Element, error) {
-	// The Element() method only adds attributes when they have non-empty values
+	// Build assertion element structure manually to control element ordering
+	// SAML 2.0 XSD requires: Issuer, Signature, Subject, Conditions, ...
 	assertionElement := assertion.Element()
 
 	// Create key store
@@ -270,22 +271,43 @@ func (i *IdP) signAssertion(assertion *saml.Assertion) (*etree.Element, error) {
 	signingContext := dsig.NewDefaultSigningContext(&keyStore)
 	signingContext.SetSignatureMethod(dsig.RSASHA256SignatureMethod)
 
-	// Sign the element - this computes the signature and appends it
-	// NOTE: We leave the signature at the end (where SignEnveloped places it)
-	// Moving it after signing would invalidate the signature
-	// Most SAML implementations accept signatures at the end of the Assertion
-	signedElement, err := signingContext.SignEnveloped(assertionElement)
+	// Construct the signature element (but don't append it yet)
+	// This creates the complete Signature element with SignedInfo, SignatureValue, KeyInfo
+	signatureElement, err := signingContext.ConstructSignature(assertionElement, true)
 	if err != nil {
-		return nil, fmt.Errorf("failed to sign assertion: %w", err)
+		return nil, fmt.Errorf("failed to construct signature: %w", err)
 	}
 
-	i.logger.Debug("Assertion signed successfully",
+	// Now manually insert the Signature at the correct position:
+	// After Issuer (index 0), before Subject and other elements
+	// This ensures the signature is in the correct position when validated
+	children := assertionElement.ChildElements()
+
+	// Find the Issuer element (should be first child)
+	issuerIndex := -1
+	for idx, child := range children {
+		if child.Tag == "Issuer" {
+			issuerIndex = idx
+			break
+		}
+	}
+
+	// Insert signature after Issuer (at index issuerIndex + 1)
+	if issuerIndex >= 0 {
+		assertionElement.InsertChildAt(issuerIndex+1, signatureElement)
+	} else {
+		// Fallback: insert at beginning if Issuer not found
+		assertionElement.InsertChildAt(0, signatureElement)
+	}
+
+	i.logger.Debug("Assertion signed successfully with signature positioned after Issuer",
 		zap.String("assertion_id", assertion.ID),
 		zap.String("signature_method", "RSA-SHA256"),
-		zap.Int("child_count", len(signedElement.ChildElements())),
+		zap.Int("signature_position", issuerIndex+1),
+		zap.Int("child_count", len(assertionElement.ChildElements())),
 	)
 
-	return signedElement, nil
+	return assertionElement, nil
 }
 
 // signResponse signs the SAML response element and returns signed element
