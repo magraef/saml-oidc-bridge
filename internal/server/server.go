@@ -146,6 +146,16 @@ func (s *Server) handleSAMLLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Log detailed SAML request information
+	s.logger.Debug("Parsed SAML AuthnRequest",
+		zap.String("request_id", authnRequest.ID),
+		zap.String("issuer", authnRequest.Issuer.Value),
+		zap.String("acs_url", authnRequest.AssertionConsumerServiceURL),
+		zap.String("destination", authnRequest.Destination),
+		zap.Time("issue_instant", authnRequest.IssueInstant),
+		zap.String("protocol_binding", authnRequest.ProtocolBinding),
+	)
+
 	// Validate SAML request
 	if err := s.validateSAMLRequest(authnRequest); err != nil {
 		s.logger.Error("SAML request validation failed", zap.Error(err))
@@ -155,6 +165,13 @@ func (s *Server) handleSAMLLogin(w http.ResponseWriter, r *http.Request) {
 
 	// Get RelayState
 	relayState := s.samlParser.GetRelayState(r)
+
+	if relayState != "" {
+		s.logger.Debug("SAML request includes RelayState",
+			zap.String("relay_state", relayState),
+			zap.Int("relay_state_length", len(relayState)),
+		)
+	}
 
 	// Validate RelayState
 	if err := s.validateRelayState(relayState); err != nil {
@@ -202,6 +219,12 @@ func (s *Server) handleSAMLLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.logger.Debug("Created session cookie",
+		zap.String("request_id", authnRequest.ID),
+		zap.String("state", state),
+		zap.Bool("has_relay_state", relayState != ""),
+	)
+
 	// Redirect to OIDC provider
 	authURL := s.oidcAuth.GetAuthorizationURL(state)
 	s.logger.Info("Redirecting to OIDC provider",
@@ -225,6 +248,12 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid session", http.StatusBadRequest)
 		return
 	}
+
+	s.logger.Debug("Retrieved session from cookie",
+		zap.String("request_id", session.RequestID),
+		zap.String("state", session.State),
+		zap.Bool("has_relay_state", session.RelayState != ""),
+	)
 
 	// Verify state
 	state := r.URL.Query().Get("state")
@@ -254,12 +283,25 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Exchange code for tokens
+	s.logger.Debug("Exchanging authorization code for tokens",
+		zap.String("request_id", session.RequestID),
+	)
+
 	userClaims, err := s.oidcAuth.ExchangeCodeForToken(ctx, code)
 	if err != nil {
 		s.logger.Error("Failed to handle callback", zap.Error(err))
 		http.Error(w, "Authentication failed", http.StatusInternalServerError)
 		return
 	}
+
+	// Log extracted OIDC claims (without sensitive data)
+	s.logger.Debug("Successfully extracted OIDC user claims",
+		zap.String("subject", userClaims.Subject),
+		zap.String("email", userClaims.Email),
+		zap.Bool("email_verified", userClaims.EmailVerified),
+		zap.String("preferred_username", userClaims.PreferredUsername),
+		zap.Int("total_claims_count", len(userClaims.Claims)),
+	)
 
 	// Get stored SAML request
 	relayState, spACSURL, err := s.samlRequestStore.GetSAMLRequestData(ctx, session.RequestID)
@@ -268,6 +310,12 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid request", http.StatusBadRequest)
 		return
 	}
+
+	s.logger.Debug("Retrieved stored SAML request data",
+		zap.String("request_id", session.RequestID),
+		zap.String("sp_acs_url", spACSURL),
+		zap.Bool("has_relay_state", relayState != ""),
+	)
 
 	// Map OIDC claims to SAML attributes using the claims mapper
 	nameID := s.claimsMapper.GetNameID(userClaims)
@@ -293,14 +341,23 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 	// Delete used request
 	if err := s.samlRequestStore.DeleteSAMLRequest(ctx, session.RequestID); err != nil {
 		s.logger.Warn("Failed to delete SAML request", zap.Error(err))
+	} else {
+		s.logger.Debug("Deleted SAML request from store",
+			zap.String("request_id", session.RequestID),
+		)
 	}
 
 	// Clear session
 	s.clearSession(w)
+	s.logger.Debug("Cleared session cookie",
+		zap.String("request_id", session.RequestID),
+	)
 
 	s.logger.Info("Sending SAML response to SP",
 		zap.String("sp_acs_url", spACSURL),
 		zap.String("name_id", nameID),
+		zap.Int("attributes_count", len(attributes)),
+		zap.String("request_id", session.RequestID),
 	)
 
 	// Render auto-submit form

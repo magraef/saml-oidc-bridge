@@ -48,6 +48,12 @@ func (s *Server) securityHeadersMiddleware(next http.Handler) http.Handler {
 // loggingMiddleware logs HTTP requests with security-relevant information
 func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Skip logging for health check endpoint to reduce noise
+		if r.URL.Path == "/healthz" {
+			next.ServeHTTP(w, r)
+			return
+		}
+
 		start := time.Now()
 
 		// Log request with security context

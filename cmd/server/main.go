@@ -108,7 +108,7 @@ func main() {
 	defer store.Close()
 
 	// Create claims mapper
-	claimsMapper := server.NewConfigClaimsMapper(&cfg.Mapping)
+	claimsMapper := server.NewConfigClaimsMapper(&cfg.Mapping, logger)
 
 	// Create server with all dependencies
 	srv := server.NewServer(
