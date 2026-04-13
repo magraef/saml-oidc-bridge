@@ -6,15 +6,49 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/xml"
+	"io"
 	"math/big"
+	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"go.uber.org/zap"
 )
+
+// downloadFile downloads a file from the given URL and saves it to the specified path
+func downloadFile(filepath string, url string) error {
+	// Create HTTP client with timeout
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+	}
+
+	// Make GET request
+	resp, err := client.Get(url)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	// Check response status
+	if resp.StatusCode != http.StatusOK {
+		return os.ErrNotExist
+	}
+
+	// Create the file
+	out, err := os.Create(filepath)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+
+	// Write the response body to file
+	_, err = io.Copy(out, resp.Body)
+	return err
+}
 
 // TestSAMLResponseAgainstSchema validates the generated SAML Response against the official SAML 2.0 XSD schema
 func TestSAMLResponseAgainstSchema(t *testing.T) {
@@ -103,11 +137,12 @@ func TestSAMLResponseAgainstSchema(t *testing.T) {
 	// Pretty print the XML for debugging
 	t.Logf("Generated SAML Response:\n%s", fullXML)
 
-	// Download SAML schemas if not present
-	schemaDir := "/tmp/saml-schemas"
-	if err := os.MkdirAll(schemaDir, 0755); err != nil {
-		t.Fatalf("Failed to create schema directory: %v", err)
+	// Create temporary directory for schemas
+	schemaDir, err := os.MkdirTemp("", "saml-schemas-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp schema directory: %v", err)
 	}
+	defer os.RemoveAll(schemaDir) // Clean up after test
 
 	schemas := map[string]string{
 		"saml-schema-protocol-2.0.xsd":  "https://docs.oasis-open.org/security/saml/v2.0/saml-schema-protocol-2.0.xsd",
@@ -116,14 +151,13 @@ func TestSAMLResponseAgainstSchema(t *testing.T) {
 		"xenc-schema.xsd":               "https://www.w3.org/TR/2002/REC-xmlenc-core-20021210/xenc-schema.xsd",
 	}
 
+	// Download schemas using native Go HTTP client
 	for filename, url := range schemas {
-		schemaPath := schemaDir + "/" + filename
-		if _, err := os.Stat(schemaPath); os.IsNotExist(err) {
-			t.Logf("Downloading schema: %s", filename)
-			cmd := exec.Command("curl", "-s", "-o", schemaPath, url)
-			if err := cmd.Run(); err != nil {
-				t.Logf("Warning: Failed to download schema %s: %v", filename, err)
-			}
+		schemaPath := filepath.Join(schemaDir, filename)
+		t.Logf("Downloading schema: %s", filename)
+
+		if err := downloadFile(schemaPath, url); err != nil {
+			t.Logf("Warning: Failed to download schema %s: %v", filename, err)
 		}
 	}
 
