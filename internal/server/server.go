@@ -84,12 +84,19 @@ func NewServer(
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
-	// Register handlers
-	mux.HandleFunc("/saml/login", s.handleSAMLLogin)
-	mux.HandleFunc("/oidc/callback", s.handleOIDCCallback)
-	mux.HandleFunc("/saml/acs", s.handleSAMLACS)
-	mux.HandleFunc("/metadata", s.handleMetadata)
-	mux.HandleFunc("/healthz", s.handleHealth)
+	// Register handlers with native HTTP method routing (Go 1.22+)
+	// SAML login accepts both GET and POST (GET for redirect binding, POST for POST binding)
+	mux.HandleFunc("GET /saml/login", s.handleSAMLLogin)
+	mux.HandleFunc("POST /saml/login", s.handleSAMLLogin)
+
+	// OIDC callback is always GET (OAuth2 redirect)
+	mux.HandleFunc("GET /oidc/callback", s.handleOIDCCallback)
+
+	// Metadata is always GET
+	mux.HandleFunc("GET /metadata", s.handleMetadata)
+
+	// Health check is always GET
+	mux.HandleFunc("GET /healthz", s.handleHealth)
 
 	return s.securityHeadersMiddleware(s.loggingMiddleware(mux))
 }
@@ -362,12 +369,6 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 
 	// Render auto-submit form
 	s.renderSAMLResponse(w, spACSURL, responseEncoded, relayState)
-}
-
-// handleSAMLACS handles POST to ACS (not typically used in this flow)
-func (s *Server) handleSAMLACS(w http.ResponseWriter, r *http.Request) {
-	s.logger.Warn("Received unexpected POST to /saml/acs")
-	http.Error(w, "Not implemented", http.StatusNotImplemented)
 }
 
 // handleMetadata returns SAML IdP metadata
