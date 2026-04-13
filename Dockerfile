@@ -25,7 +25,8 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
 RUN echo "nonroot:x:65532:65532:nonroot:/:/sbin/nologin" > /tmp/passwd
 
 # Create empty directory structure for scratch image
-RUN mkdir -p /tmp/data
+RUN mkdir -p /tmp/data \
+    && chmod -R 0777 /tmp/data
 
 # Final stage - using scratch (minimal possible image)
 FROM scratch
@@ -53,8 +54,5 @@ ENV TMPDIR=/data
 
 # Expose port
 EXPOSE 8080
-
-# Run as non-root user (UID 65532 for OpenShift compatibility)
-USER 65532:65532
 
 ENTRYPOINT ["/app/saml-oidc-bridge"]
