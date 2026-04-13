@@ -12,7 +12,7 @@ This service acts as a SAML Identity Provider (IdP) for your application while a
 │   SAML SP   │ ◄──────────────► │  SAML-OIDC Bridge │ ◄───────────► │  OIDC IdP    │
 │ (Your App)  │   AuthnRequest   │                   │  OAuth2 Flow  │  (Google,    │
 └─────────────┘   SAMLResponse   └───────────────────┘               │  Azure, etc) │
-                                                                      └──────────────┘
+                                                                     └──────────────┘
 ```
 
 ## Features
