@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"net/http"
 
 	"saml-oidc-bridge/internal/oidc"
 
@@ -41,33 +40,6 @@ func (m *mockOIDCAuth) ExchangeCodeForToken(ctx context.Context, code string) (*
 		Name:    "Mock User",
 		Claims:  map[string]interface{}{"email": "user@example.com"},
 	}, nil
-}
-
-// mockSAMLParser is a test double for SAMLRequestParser
-type mockSAMLParser struct {
-	request    *saml.AuthnRequest
-	relayState string
-	err        error
-}
-
-func (m *mockSAMLParser) ParseAuthnRequest(r *http.Request) (*saml.AuthnRequest, error) {
-	if m.err != nil {
-		return nil, m.err
-	}
-	if m.request != nil {
-		return m.request, nil
-	}
-	return &saml.AuthnRequest{
-		ID: "mock-request-id",
-		Issuer: &saml.Issuer{
-			Value: "https://sp.example.com",
-		},
-		AssertionConsumerServiceURL: "https://sp.example.com/acs",
-	}, nil
-}
-
-func (m *mockSAMLParser) GetRelayState(r *http.Request) string {
-	return m.relayState
 }
 
 // mockSAMLResponder is a test double for SAMLResponseCreator
@@ -126,15 +98,6 @@ func (m *mockSAMLRequestStore) DeleteSAMLRequest(ctx context.Context, requestID 
 	return m.err
 }
 
-// mockRequestCleaner is a test double for ExpiredRequestCleaner
-type mockRequestCleaner struct {
-	err error
-}
-
-func (m *mockRequestCleaner) CleanupExpired(ctx context.Context, expiryTime int64) error {
-	return m.err
-}
-
 // mockClaimsMapper is a test double for ClaimsMapper
 type mockClaimsMapper struct {
 	nameID     string
@@ -156,44 +119,4 @@ func (m *mockClaimsMapper) MapAttributes(claims *oidc.UserClaims) map[string]str
 		"email": claims.Email,
 		"name":  claims.Name,
 	}
-}
-
-// mockStore is a test double for storage.Store
-type mockStore struct {
-	createSessionErr error
-	getSessionErr    error
-	deleteSessionErr error
-}
-
-func (m *mockStore) CreateSession(ctx context.Context, arg interface{}) error {
-	return m.createSessionErr
-}
-
-func (m *mockStore) GetSession(ctx context.Context, sessionIndex string) (interface{}, error) {
-	if m.getSessionErr != nil {
-		return nil, m.getSessionErr
-	}
-	return struct {
-		SessionIndex string
-		NameID       string
-		IDToken      string
-		SpEntityID   string
-		CreatedAt    int64
-		ExpiresAt    int64
-	}{
-		SessionIndex: sessionIndex,
-		NameID:       "user@example.com",
-		IDToken:      "mock-id-token",
-		SpEntityID:   "https://sp.example.com",
-		CreatedAt:    0,
-		ExpiresAt:    0,
-	}, nil
-}
-
-func (m *mockStore) DeleteSession(ctx context.Context, sessionIndex string) error {
-	return m.deleteSessionErr
-}
-
-func (m *mockStore) Close() error {
-	return nil
 }

@@ -317,31 +317,6 @@ func (i *IdP) signAssertion(assertion *saml.Assertion) (*etree.Element, error) {
 	return assertionElement, nil
 }
 
-// signResponse signs the SAML response element and returns signed element
-func (i *IdP) signResponse(responseElement *etree.Element) (*etree.Element, error) {
-	// Create key store
-	keyStore := dsig.TLSCertKeyStore{
-		PrivateKey:  i.privateKey,
-		Certificate: [][]byte{i.certificate.Raw},
-	}
-
-	// Create signing context
-	signingContext := dsig.NewDefaultSigningContext(&keyStore)
-	signingContext.SetSignatureMethod(dsig.RSASHA256SignatureMethod)
-
-	// Sign the element
-	signedElement, err := signingContext.SignEnveloped(responseElement)
-	if err != nil {
-		return nil, fmt.Errorf("failed to sign response: %w", err)
-	}
-
-	i.logger.Debug("Response signed successfully",
-		zap.String("signature_method", "RSA-SHA256"),
-	)
-
-	return signedElement, nil
-}
-
 // signResponseManually signs the SAML response element with correct signature positioning
 func (i *IdP) signResponseManually(responseElement *etree.Element) (*etree.Element, error) {
 	// Create key store
