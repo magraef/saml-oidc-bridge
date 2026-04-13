@@ -41,6 +41,10 @@ COPY --from=builder /tmp/passwd /etc/passwd
 # Copy binary from builder
 COPY --from=builder /build/saml-oidc-bridge .
 
+# Set TMPDIR to use the data directory for SQLite temp files
+# This is required because scratch image has no /tmp directory
+ENV TMPDIR=/data
+
 # Expose port
 EXPOSE 8080
 
