@@ -18,12 +18,11 @@ This service acts as a SAML Identity Provider (IdP) for your application while a
 ## Features
 
 - **Simplified Configuration** - Single base URL derives all SAML and OIDC endpoints
-- **Security Hardened** - CSRF protection, request replay prevention, secure sessions
+- **Security Hardened** - CSRF protection, request replay prevention, secure sessions, AES-256-GCM encryption for ID tokens
 - **Flexible Attribute Mapping** - Map OIDC claims to SAML attributes
-- **Production Ready** - AES-256-GCM encryption, structured logging, health checks
-- **SAML 2.0 Compliant** - Signed assertions with RSA-SHA256 + C14N 1.1
+- **SAML 2.0 Compliant** - Signed assertions and responses with RSA-SHA256 + C14N 1.1
 - **Single Logout Support** - SAML SLO implementation
-- **Auto Certificate Generation** - Self-signed certs for development
+- **Certificate support** - Self-signed certs for development, cert-manager for production
 
 ## API Endpoints
 
@@ -186,8 +185,6 @@ Before deploying to production:
 - [ ] ID token encryption enabled: `STORAGE_ENCRYPTION_KEY=$(openssl rand -hex 32)`
 - [ ] Production certificates configured (not self-signed)
 - [ ] Rate limiting enabled (via reverse proxy)
-- [ ] Monitoring and alerting configured
-- [ ] Review [SECURITY.md](.docs/SECURITY.md)
 
 ## Certificate Management
 
@@ -220,7 +217,7 @@ openssl req -new -x509 -key tls.key -out tls.crt -days 365 \
 
 ### Kubernetes (cert-manager)
 
-Use cert-manager for automatic certificate management. See [.docs/k8s/CERT-MANAGER.md](.docs/k8s/CERT-MANAGER.md) for details.
+Use cert-manager for automatic certificate management.
 
 ## Deployment
 
