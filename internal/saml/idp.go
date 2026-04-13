@@ -232,11 +232,10 @@ func (i *IdP) CreateResponse(requestID, nameID string, attributes map[string]str
 	// 5. Assertion/EncryptedAssertion (from ResponseType - we add this)
 	//
 	// Note: We sign both the Assertion AND the Response for maximum compatibility.
-	// This works with SPs that validate either signature (OR logic).
 	responseElement.AddChild(signedAssertionElement)
 
-	// Sign the entire Response (which now contains the signed Assertion)
-	signedResponseElement, err := i.signResponse(responseElement)
+	// Sign the Response element manually to control signature position
+	signedResponseElement, err := i.signResponseManually(responseElement)
 	if err != nil {
 		return nil, fmt.Errorf("failed to sign response: %w", err)
 	}
@@ -329,8 +328,6 @@ func (i *IdP) signResponse(responseElement *etree.Element) (*etree.Element, erro
 	// Create signing context
 	signingContext := dsig.NewDefaultSigningContext(&keyStore)
 	signingContext.SetSignatureMethod(dsig.RSASHA256SignatureMethod)
-	// Set C14N 1.1 canonicalization to match SP expectations
-	signingContext.Canonicalizer = dsig.MakeC14N11Canonicalizer()
 
 	// Sign the element
 	signedElement, err := signingContext.SignEnveloped(responseElement)
@@ -343,6 +340,57 @@ func (i *IdP) signResponse(responseElement *etree.Element) (*etree.Element, erro
 	)
 
 	return signedElement, nil
+}
+
+// signResponseManually signs the SAML response element with correct signature positioning
+func (i *IdP) signResponseManually(responseElement *etree.Element) (*etree.Element, error) {
+	// Create key store
+	keyStore := dsig.TLSCertKeyStore{
+		PrivateKey:  i.privateKey,
+		Certificate: [][]byte{i.certificate.Raw},
+	}
+
+	// Create signing context
+	signingContext := dsig.NewDefaultSigningContext(&keyStore)
+	signingContext.SetSignatureMethod(dsig.RSASHA256SignatureMethod)
+	// Set C14N 1.1 canonicalization to match SP expectations
+	signingContext.Canonicalizer = dsig.MakeC14N11Canonicalizer()
+
+	// Construct the signature element (but don't append it yet)
+	signatureElement, err := signingContext.ConstructSignature(responseElement, true)
+	if err != nil {
+		return nil, fmt.Errorf("failed to construct response signature: %w", err)
+	}
+
+	// Manually insert the Signature at the correct position:
+	// SAML 2.0 schema order: Issuer, Signature, Extensions (optional), Status, Assertion
+	// After Issuer (index 0), before Status
+	children := responseElement.ChildElements()
+
+	// Find the Issuer element (should be first child)
+	issuerIndex := -1
+	for idx, child := range children {
+		if child.Tag == "Issuer" {
+			issuerIndex = idx
+			break
+		}
+	}
+
+	// Insert signature after Issuer (at index issuerIndex + 1)
+	if issuerIndex >= 0 {
+		responseElement.InsertChildAt(issuerIndex+1, signatureElement)
+	} else {
+		// Fallback: insert at beginning if Issuer not found
+		responseElement.InsertChildAt(0, signatureElement)
+	}
+
+	i.logger.Debug("Response signed successfully with signature positioned after Issuer",
+		zap.String("signature_method", "RSA-SHA256"),
+		zap.Int("signature_position", issuerIndex+1),
+		zap.Int("child_count", len(responseElement.ChildElements())),
+	)
+
+	return responseElement, nil
 }
 
 // GetMetadata returns the SAML IdP metadata
