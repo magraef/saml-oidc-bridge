@@ -226,18 +226,24 @@ func (i *IdP) CreateResponse(requestID, nameID string, attributes map[string]str
 	// Add the signed assertion element to the response
 	// According to SAML 2.0 schema (ResponseType), the order must be:
 	// 1. Issuer (from StatusResponseType, already added by Element())
-	// 2. Signature (from StatusResponseType, optional - we skip this)
+	// 2. Signature (from StatusResponseType, optional - we will add this)
 	// 3. Extensions (from StatusResponseType, optional - we don't use)
 	// 4. Status (from StatusResponseType, already added by Element())
 	// 5. Assertion/EncryptedAssertion (from ResponseType - we add this)
 	//
-	// Note: We only sign the Assertion, not the Response itself.
-	// This is a common and valid SAML 2.0 pattern.
+	// Note: We sign both the Assertion AND the Response for maximum compatibility.
+	// This works with SPs that validate either signature (OR logic).
 	responseElement.AddChild(signedAssertionElement)
+
+	// Sign the entire Response (which now contains the signed Assertion)
+	signedResponseElement, err := i.signResponse(responseElement)
+	if err != nil {
+		return nil, fmt.Errorf("failed to sign response: %w", err)
+	}
 
 	// Create final document
 	finalDoc := etree.NewDocument()
-	finalDoc.SetRoot(responseElement)
+	finalDoc.SetRoot(signedResponseElement)
 
 	// Convert to XML bytes
 	signedXML, err := finalDoc.WriteToBytes()
@@ -323,6 +329,8 @@ func (i *IdP) signResponse(responseElement *etree.Element) (*etree.Element, erro
 	// Create signing context
 	signingContext := dsig.NewDefaultSigningContext(&keyStore)
 	signingContext.SetSignatureMethod(dsig.RSASHA256SignatureMethod)
+	// Set C14N 1.1 canonicalization to match SP expectations
+	signingContext.Canonicalizer = dsig.MakeC14N11Canonicalizer()
 
 	// Sign the element
 	signedElement, err := signingContext.SignEnveloped(responseElement)
