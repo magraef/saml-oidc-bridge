@@ -75,7 +75,7 @@ func TestHandleOIDCCallback_Success(t *testing.T) {
 		response: []byte("<saml:Response>test</saml:Response>"),
 	}
 
-	mockStore := &mockSAMLRequestStore{
+	mockRequestStore := &mockSAMLRequestStore{
 		relayState: "",
 		spACSURL:   "https://sp.example.com/acs",
 	}
@@ -90,9 +90,9 @@ func TestHandleOIDCCallback_Success(t *testing.T) {
 		nil, // Parser not needed
 		mockResponder,
 		nil, // Metadata not needed
-		mockStore,
+		mockRequestStore,
 		mockMapper,
-		nil,
+		nil, // Store not needed for this test - session creation will be skipped
 		zap.NewNop(),
 		"test-cookie",
 		false,

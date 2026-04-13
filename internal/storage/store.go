@@ -131,12 +131,27 @@ func (s *Store) CleanupExpired(ctx context.Context, expiryTime int64) error {
 	return s.queries.DeleteExpiredRequests(ctx, expiryTime)
 }
 
-// cleanupExpiredRequests periodically removes expired SAML requests.
+// CreateSession stores a new session
+func (s *Store) CreateSession(ctx context.Context, arg CreateSessionParams) error {
+	return s.queries.CreateSession(ctx, arg)
+}
+
+// GetSession retrieves a session by session index
+func (s *Store) GetSession(ctx context.Context, sessionIndex string) (Session, error) {
+	return s.queries.GetSession(ctx, sessionIndex)
+}
+
+// DeleteSession removes a session
+func (s *Store) DeleteSession(ctx context.Context, sessionIndex string) error {
+	return s.queries.DeleteSession(ctx, sessionIndex)
+}
+
+// cleanupExpiredRequests periodically removes expired SAML requests and sessions.
 func (s *Store) cleanupExpiredRequests(ctx context.Context) {
 	ticker := time.NewTicker(5 * time.Minute)
 	defer ticker.Stop()
 
-	s.logger.Debug("Started cleanup goroutine for expired SAML requests")
+	s.logger.Debug("Started cleanup goroutine for expired SAML requests and sessions")
 
 	for {
 		select {
@@ -147,11 +162,20 @@ func (s *Store) cleanupExpiredRequests(ctx context.Context) {
 			cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			now := time.Now().Unix()
 
+			// Cleanup expired SAML requests
 			if err := s.CleanupExpired(cleanupCtx, now); err != nil {
 				s.logger.Error("Failed to cleanup expired requests", zap.Error(err))
 			} else {
 				s.logger.Debug("Cleaned up expired requests")
 			}
+
+			// Cleanup expired sessions
+			if err := s.queries.DeleteExpiredSessions(cleanupCtx, now); err != nil {
+				s.logger.Error("Failed to cleanup expired sessions", zap.Error(err))
+			} else {
+				s.logger.Debug("Cleaned up expired sessions")
+			}
+
 			cancel()
 		}
 	}

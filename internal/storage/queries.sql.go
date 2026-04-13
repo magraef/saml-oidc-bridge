@@ -9,6 +9,50 @@ import (
 	"context"
 )
 
+const createSession = `-- name: CreateSession :exec
+INSERT INTO sessions (session_index, name_id, id_token, sp_entity_id, created_at, expires_at)
+VALUES (?, ?, ?, ?, ?, ?)
+`
+
+type CreateSessionParams struct {
+	SessionIndex string `json:"session_index"`
+	NameID       string `json:"name_id"`
+	IDToken      string `json:"id_token"`
+	SpEntityID   string `json:"sp_entity_id"`
+	CreatedAt    int64  `json:"created_at"`
+	ExpiresAt    int64  `json:"expires_at"`
+}
+
+func (q *Queries) CreateSession(ctx context.Context, arg CreateSessionParams) error {
+	_, err := q.db.ExecContext(ctx, createSession,
+		arg.SessionIndex,
+		arg.NameID,
+		arg.IDToken,
+		arg.SpEntityID,
+		arg.CreatedAt,
+		arg.ExpiresAt,
+	)
+	return err
+}
+
+const deleteExpiredSessions = `-- name: DeleteExpiredSessions :exec
+DELETE FROM sessions WHERE expires_at < ?
+`
+
+func (q *Queries) DeleteExpiredSessions(ctx context.Context, expiresAt int64) error {
+	_, err := q.db.ExecContext(ctx, deleteExpiredSessions, expiresAt)
+	return err
+}
+
+const deleteSession = `-- name: DeleteSession :exec
+DELETE FROM sessions WHERE session_index = ?
+`
+
+func (q *Queries) DeleteSession(ctx context.Context, sessionIndex string) error {
+	_, err := q.db.ExecContext(ctx, deleteSession, sessionIndex)
+	return err
+}
+
 const getSAMLRequest = `-- name: GetSAMLRequest :one
 SELECT id, relay_state, sp_acs_url, created_at, expires_at
 FROM saml_requests
@@ -22,6 +66,26 @@ func (q *Queries) GetSAMLRequest(ctx context.Context, id string) (SamlRequest, e
 		&i.ID,
 		&i.RelayState,
 		&i.SpAcsUrl,
+		&i.CreatedAt,
+		&i.ExpiresAt,
+	)
+	return i, err
+}
+
+const getSession = `-- name: GetSession :one
+SELECT session_index, name_id, id_token, sp_entity_id, created_at, expires_at
+FROM sessions
+WHERE session_index = ?
+`
+
+func (q *Queries) GetSession(ctx context.Context, sessionIndex string) (Session, error) {
+	row := q.db.QueryRowContext(ctx, getSession, sessionIndex)
+	var i Session
+	err := row.Scan(
+		&i.SessionIndex,
+		&i.NameID,
+		&i.IDToken,
+		&i.SpEntityID,
 		&i.CreatedAt,
 		&i.ExpiresAt,
 	)

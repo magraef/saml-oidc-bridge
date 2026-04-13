@@ -13,6 +13,7 @@ import (
 	"saml-oidc-bridge/internal/oidc"
 	"saml-oidc-bridge/internal/storage"
 
+	"github.com/crewjam/saml"
 	"go.uber.org/zap"
 )
 
@@ -84,19 +85,13 @@ func NewServer(
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
-	// Register handlers with native HTTP method routing (Go 1.22+)
-	// SAML login accepts both GET and POST (GET for redirect binding, POST for POST binding)
-	mux.HandleFunc("GET /saml/login", s.handleSAMLLogin)
-	mux.HandleFunc("POST /saml/login", s.handleSAMLLogin)
-
-	// OIDC callback is always GET (OAuth2 redirect)
-	mux.HandleFunc("GET /oidc/callback", s.handleOIDCCallback)
-
-	// Metadata is always GET
-	mux.HandleFunc("GET /metadata", s.handleMetadata)
-
-	// Health check is always GET
-	mux.HandleFunc("GET /healthz", s.handleHealth)
+	// Register handlers
+	mux.HandleFunc("/saml/login", s.handleSAMLLogin)
+	mux.HandleFunc("/oidc/callback", s.handleOIDCCallback)
+	mux.HandleFunc("/saml/acs", s.handleSAMLACS)
+	mux.HandleFunc("/saml/logout", s.handleSAMLLogout)
+	mux.HandleFunc("/metadata", s.handleMetadata)
+	mux.HandleFunc("/healthz", s.handleHealth)
 
 	return s.securityHeadersMiddleware(s.loggingMiddleware(mux))
 }
@@ -153,16 +148,6 @@ func (s *Server) handleSAMLLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Log detailed SAML request information
-	s.logger.Debug("Parsed SAML AuthnRequest",
-		zap.String("request_id", authnRequest.ID),
-		zap.String("issuer", authnRequest.Issuer.Value),
-		zap.String("acs_url", authnRequest.AssertionConsumerServiceURL),
-		zap.String("destination", authnRequest.Destination),
-		zap.Time("issue_instant", authnRequest.IssueInstant),
-		zap.String("protocol_binding", authnRequest.ProtocolBinding),
-	)
-
 	// Validate SAML request
 	if err := s.validateSAMLRequest(authnRequest); err != nil {
 		s.logger.Error("SAML request validation failed", zap.Error(err))
@@ -172,13 +157,6 @@ func (s *Server) handleSAMLLogin(w http.ResponseWriter, r *http.Request) {
 
 	// Get RelayState
 	relayState := s.samlParser.GetRelayState(r)
-
-	if relayState != "" {
-		s.logger.Debug("SAML request includes RelayState",
-			zap.String("relay_state", relayState),
-			zap.Int("relay_state_length", len(relayState)),
-		)
-	}
 
 	// Validate RelayState
 	if err := s.validateRelayState(relayState); err != nil {
@@ -226,12 +204,6 @@ func (s *Server) handleSAMLLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.logger.Debug("Created session cookie",
-		zap.String("request_id", authnRequest.ID),
-		zap.String("state", state),
-		zap.Bool("has_relay_state", relayState != ""),
-	)
-
 	// Redirect to OIDC provider
 	authURL := s.oidcAuth.GetAuthorizationURL(state)
 	s.logger.Info("Redirecting to OIDC provider",
@@ -255,12 +227,6 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid session", http.StatusBadRequest)
 		return
 	}
-
-	s.logger.Debug("Retrieved session from cookie",
-		zap.String("request_id", session.RequestID),
-		zap.String("state", session.State),
-		zap.Bool("has_relay_state", session.RelayState != ""),
-	)
 
 	// Verify state
 	state := r.URL.Query().Get("state")
@@ -290,25 +256,12 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Exchange code for tokens
-	s.logger.Debug("Exchanging authorization code for tokens",
-		zap.String("request_id", session.RequestID),
-	)
-
 	userClaims, err := s.oidcAuth.ExchangeCodeForToken(ctx, code)
 	if err != nil {
 		s.logger.Error("Failed to handle callback", zap.Error(err))
 		http.Error(w, "Authentication failed", http.StatusInternalServerError)
 		return
 	}
-
-	// Log extracted OIDC claims (without sensitive data)
-	s.logger.Debug("Successfully extracted OIDC user claims",
-		zap.String("subject", userClaims.Subject),
-		zap.String("email", userClaims.Email),
-		zap.Bool("email_verified", userClaims.EmailVerified),
-		zap.String("preferred_username", userClaims.PreferredUsername),
-		zap.Int("total_claims_count", len(userClaims.Claims)),
-	)
 
 	// Get stored SAML request
 	relayState, spACSURL, err := s.samlRequestStore.GetSAMLRequestData(ctx, session.RequestID)
@@ -317,12 +270,6 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid request", http.StatusBadRequest)
 		return
 	}
-
-	s.logger.Debug("Retrieved stored SAML request data",
-		zap.String("request_id", session.RequestID),
-		zap.String("sp_acs_url", spACSURL),
-		zap.Bool("has_relay_state", relayState != ""),
-	)
 
 	// Map OIDC claims to SAML attributes using the claims mapper
 	nameID := s.claimsMapper.GetNameID(userClaims)
@@ -335,6 +282,33 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 	attributes := s.claimsMapper.MapAttributes(userClaims)
 
 	// Create and sign SAML response (returns signed XML bytes)
+
+	// Store session for logout support (if store is available)
+	if s.store != nil {
+		sessionIndex := fmt.Sprintf("session-%d", time.Now().UnixNano())
+		now := time.Now().Unix()
+		expires := time.Now().Add(24 * time.Hour).Unix()
+
+		// Store session with ID token for OIDC logout
+		err = s.store.CreateSession(ctx, storage.CreateSessionParams{
+			SessionIndex: sessionIndex,
+			NameID:       nameID,
+			IDToken:      userClaims.IDToken,
+			SpEntityID:   s.spEntityID,
+			CreatedAt:    now,
+			ExpiresAt:    expires,
+		})
+		if err != nil {
+			s.logger.Warn("Failed to store session", zap.Error(err))
+			// Continue anyway - logout will still work without session
+		} else {
+			s.logger.Debug("Created session for logout",
+				zap.String("session_index", sessionIndex),
+				zap.String("name_id", nameID),
+			)
+		}
+	}
+
 	responseXML, err := s.samlResponder.CreateResponse(session.RequestID, nameID, attributes)
 	if err != nil {
 		s.logger.Error("Failed to create SAML response", zap.Error(err))
@@ -348,27 +322,24 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 	// Delete used request
 	if err := s.samlRequestStore.DeleteSAMLRequest(ctx, session.RequestID); err != nil {
 		s.logger.Warn("Failed to delete SAML request", zap.Error(err))
-	} else {
-		s.logger.Debug("Deleted SAML request from store",
-			zap.String("request_id", session.RequestID),
-		)
 	}
 
 	// Clear session
 	s.clearSession(w)
-	s.logger.Debug("Cleared session cookie",
-		zap.String("request_id", session.RequestID),
-	)
 
 	s.logger.Info("Sending SAML response to SP",
 		zap.String("sp_acs_url", spACSURL),
 		zap.String("name_id", nameID),
-		zap.Int("attributes_count", len(attributes)),
-		zap.String("request_id", session.RequestID),
 	)
 
 	// Render auto-submit form
 	s.renderSAMLResponse(w, spACSURL, responseEncoded, relayState)
+}
+
+// handleSAMLACS handles POST to ACS (not typically used in this flow)
+func (s *Server) handleSAMLACS(w http.ResponseWriter, r *http.Request) {
+	s.logger.Warn("Received unexpected POST to /saml/acs")
+	http.Error(w, "Not implemented", http.StatusNotImplemented)
 }
 
 // handleMetadata returns SAML IdP metadata
@@ -453,6 +424,185 @@ func (s *Server) clearSession(w http.ResponseWriter) {
 		HttpOnly: true,
 	}
 	http.SetCookie(w, cookie)
+}
+
+// handleSAMLLogout handles SAML logout requests
+func (s *Server) handleSAMLLogout(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	s.logger.Info("Received SAML logout request", zap.String("remote_addr", r.RemoteAddr))
+
+	// Parse SAML LogoutRequest
+	logoutRequest, err := s.samlResponder.(interface {
+		ParseLogoutRequest(*http.Request) (*saml.LogoutRequest, error)
+	}).ParseLogoutRequest(r)
+	if err != nil {
+		s.logger.Error("Failed to parse LogoutRequest", zap.Error(err))
+		http.Error(w, "Invalid SAML logout request", http.StatusBadRequest)
+		return
+	}
+
+	s.logger.Debug("Parsed SAML LogoutRequest",
+		zap.String("request_id", logoutRequest.ID),
+		zap.String("issuer", logoutRequest.Issuer.Value),
+	)
+
+	// Validate logout request
+	if err := s.validateLogoutRequest(logoutRequest); err != nil {
+		s.logger.Error("Logout request validation failed", zap.Error(err))
+		s.sendLogoutError(w, logoutRequest.ID, "urn:oasis:names:tc:SAML:2.0:status:Requester")
+		return
+	}
+
+	// Get session index from logout request
+	var sessionIndex string
+	if logoutRequest.SessionIndex != nil {
+		sessionIndex = logoutRequest.SessionIndex.Value
+	}
+
+	s.logger.Debug("Processing logout for session",
+		zap.String("session_index", sessionIndex),
+	)
+
+	// Get session from database
+	session, err := s.store.GetSession(ctx, sessionIndex)
+	if err != nil {
+		s.logger.Warn("Session not found",
+			zap.String("session_index", sessionIndex),
+			zap.Error(err),
+		)
+		// Continue with logout even if session not found
+	}
+
+	// Perform OIDC logout if session exists and has ID token
+	if session.IDToken != "" {
+		logoutURL, err := s.oidcAuth.(interface {
+			GetLogoutURL(string, string) (string, error)
+		}).GetLogoutURL(session.IDToken, "")
+		if err != nil {
+			s.logger.Warn("Failed to get OIDC logout URL", zap.Error(err))
+		} else {
+			// Call OIDC logout endpoint asynchronously
+			go func() {
+				s.logger.Debug("Calling OIDC logout endpoint", zap.String("url", logoutURL))
+				resp, err := http.Get(logoutURL)
+				if err != nil {
+					s.logger.Error("OIDC logout failed", zap.Error(err))
+					return
+				}
+				defer resp.Body.Close()
+				s.logger.Info("OIDC logout completed", zap.Int("status", resp.StatusCode))
+			}()
+		}
+	}
+
+	// Delete session from database
+	if sessionIndex != "" {
+		if err := s.store.DeleteSession(ctx, sessionIndex); err != nil {
+			s.logger.Warn("Failed to delete session", zap.Error(err))
+		} else {
+			s.logger.Debug("Deleted session from store", zap.String("session_index", sessionIndex))
+		}
+	}
+
+	// Create successful logout response
+	logoutResponseXML, err := s.samlResponder.(interface {
+		CreateLogoutResponse(string, string) ([]byte, error)
+	}).CreateLogoutResponse(logoutRequest.ID, "urn:oasis:names:tc:SAML:2.0:status:Success")
+	if err != nil {
+		s.logger.Error("Failed to create logout response", zap.Error(err))
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	// Base64 encode
+	responseEncoded := base64.StdEncoding.EncodeToString(logoutResponseXML)
+
+	// Get RelayState
+	relayState := s.samlParser.GetRelayState(r)
+
+	s.logger.Info("Sending SAML logout response to SP",
+		zap.String("sp_acs_url", s.spACSURL),
+		zap.String("request_id", logoutRequest.ID),
+	)
+
+	// Render auto-submit form
+	s.renderSAMLLogoutResponse(w, s.spACSURL, responseEncoded, relayState)
+}
+
+// validateLogoutRequest validates a SAML logout request
+func (s *Server) validateLogoutRequest(req *saml.LogoutRequest) error {
+	// Validate issuer
+	if req.Issuer.Value != s.spEntityID {
+		return fmt.Errorf("invalid issuer: %s", req.Issuer.Value)
+	}
+
+	// Validate timestamp (allow 5 minute clock skew)
+	now := time.Now()
+	if req.IssueInstant.Before(now.Add(-5 * time.Minute)) {
+		return fmt.Errorf("logout request too old")
+	}
+	if req.IssueInstant.After(now.Add(5 * time.Minute)) {
+		return fmt.Errorf("logout request from future")
+	}
+
+	return nil
+}
+
+// sendLogoutError sends a SAML logout error response
+func (s *Server) sendLogoutError(w http.ResponseWriter, requestID, statusCode string) {
+	logoutResponseXML, err := s.samlResponder.(interface {
+		CreateLogoutResponse(string, string) ([]byte, error)
+	}).CreateLogoutResponse(requestID, statusCode)
+	if err != nil {
+		s.logger.Error("Failed to create error logout response", zap.Error(err))
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	responseEncoded := base64.StdEncoding.EncodeToString(logoutResponseXML)
+	relayState := ""
+
+	s.renderSAMLLogoutResponse(w, s.spACSURL, responseEncoded, relayState)
+}
+
+// renderSAMLLogoutResponse renders an auto-submit form for logout response
+func (s *Server) renderSAMLLogoutResponse(w http.ResponseWriter, acsURL, samlResponse, relayState string) {
+	tmpl := template.Must(template.New("logout").Parse(`
+<!DOCTYPE html>
+<html>
+<head>
+    <title>SAML Logout</title>
+</head>
+<body onload="document.forms[0].submit()">
+    <form method="post" action="{{.ACSURL}}">
+        <input type="hidden" name="SAMLResponse" value="{{.SAMLResponse}}" />
+        {{if .RelayState}}
+        <input type="hidden" name="RelayState" value="{{.RelayState}}" />
+        {{end}}
+        <noscript>
+            <p>JavaScript is disabled. Please click the button below to continue.</p>
+            <input type="submit" value="Continue" />
+        </noscript>
+    </form>
+</body>
+</html>
+`))
+
+	data := struct {
+		ACSURL       string
+		SAMLResponse string
+		RelayState   string
+	}{
+		ACSURL:       acsURL,
+		SAMLResponse: samlResponse,
+		RelayState:   relayState,
+	}
+
+	w.Header().Set("Content-Type", "text/html")
+	if err := tmpl.Execute(w, data); err != nil {
+		s.logger.Error("Failed to render logout response", zap.Error(err))
+	}
 }
 
 // renderSAMLResponse renders an auto-submit form to POST the SAML response

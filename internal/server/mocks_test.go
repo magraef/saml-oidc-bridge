@@ -157,3 +157,43 @@ func (m *mockClaimsMapper) MapAttributes(claims *oidc.UserClaims) map[string]str
 		"name":  claims.Name,
 	}
 }
+
+// mockStore is a test double for storage.Store
+type mockStore struct {
+	createSessionErr error
+	getSessionErr    error
+	deleteSessionErr error
+}
+
+func (m *mockStore) CreateSession(ctx context.Context, arg interface{}) error {
+	return m.createSessionErr
+}
+
+func (m *mockStore) GetSession(ctx context.Context, sessionIndex string) (interface{}, error) {
+	if m.getSessionErr != nil {
+		return nil, m.getSessionErr
+	}
+	return struct {
+		SessionIndex string
+		NameID       string
+		IDToken      string
+		SpEntityID   string
+		CreatedAt    int64
+		ExpiresAt    int64
+	}{
+		SessionIndex: sessionIndex,
+		NameID:       "user@example.com",
+		IDToken:      "mock-id-token",
+		SpEntityID:   "https://sp.example.com",
+		CreatedAt:    0,
+		ExpiresAt:    0,
+	}, nil
+}
+
+func (m *mockStore) DeleteSession(ctx context.Context, sessionIndex string) error {
+	return m.deleteSessionErr
+}
+
+func (m *mockStore) Close() error {
+	return nil
+}

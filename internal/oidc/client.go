@@ -29,6 +29,7 @@ type UserClaims struct {
 	GivenName         string
 	FamilyName        string
 	Claims            map[string]interface{}
+	IDToken           string // Raw ID token for logout
 }
 
 // NewClient creates a new OIDC client
@@ -112,6 +113,7 @@ func (c *Client) ExchangeCodeForToken(ctx context.Context, code string) (*UserCl
 	userClaims := &UserClaims{
 		Subject: idToken.Subject,
 		Claims:  claims,
+		IDToken: rawIDToken,
 	}
 
 	// Extract standard claims
@@ -176,4 +178,36 @@ func (c *Client) HealthCheck(ctx context.Context) error {
 		return fmt.Errorf("OIDC provider health check failed: %w", err)
 	}
 	return nil
+}
+
+// GetLogoutURL generates the OIDC provider's logout URL with id_token_hint
+func (c *Client) GetLogoutURL(idToken, postLogoutRedirectURI string) (string, error) {
+	// Get provider metadata to find end_session_endpoint
+	var providerJSON struct {
+		EndSessionEndpoint string `json:"end_session_endpoint"`
+	}
+
+	if err := c.provider.Claims(&providerJSON); err != nil {
+		return "", fmt.Errorf("failed to get provider metadata: %w", err)
+	}
+
+	if providerJSON.EndSessionEndpoint == "" {
+		c.logger.Warn("OIDC provider does not advertise end_session_endpoint")
+		return "", fmt.Errorf("OIDC provider does not support logout")
+	}
+
+	// Build logout URL with parameters
+	logoutURL := providerJSON.EndSessionEndpoint + "?"
+	logoutURL += "id_token_hint=" + idToken
+
+	if postLogoutRedirectURI != "" {
+		logoutURL += "&post_logout_redirect_uri=" + postLogoutRedirectURI
+	}
+
+	c.logger.Debug("Generated OIDC logout URL",
+		zap.String("endpoint", providerJSON.EndSessionEndpoint),
+		zap.Bool("has_redirect_uri", postLogoutRedirectURI != ""),
+	)
+
+	return logoutURL, nil
 }

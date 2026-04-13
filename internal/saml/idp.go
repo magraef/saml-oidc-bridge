@@ -382,6 +382,16 @@ func (i *IdP) GetMetadata() (*saml.EntityDescriptor, error) {
 							},
 						},
 					},
+					SingleLogoutServices: []saml.Endpoint{
+						{
+							Binding:  "urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect",
+							Location: acsURL.Scheme + "://" + acsURL.Host + "/saml/logout",
+						},
+						{
+							Binding:  "urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST",
+							Location: acsURL.Scheme + "://" + acsURL.Host + "/saml/logout",
+						},
+					},
 					NameIDFormats: []saml.NameIDFormat{
 						"urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress",
 						"urn:oasis:names:tc:SAML:2.0:nameid-format:persistent",
@@ -400,4 +410,93 @@ func (i *IdP) GetMetadata() (*saml.EntityDescriptor, error) {
 
 	i.logger.Debug("Generated SAML IdP metadata")
 	return metadata, nil
+}
+
+// ParseLogoutRequest parses a SAML LogoutRequest from an HTTP request
+func (i *IdP) ParseLogoutRequest(r *http.Request) (*saml.LogoutRequest, error) {
+	// Get SAMLRequest parameter
+	samlRequestEncoded := r.URL.Query().Get("SAMLRequest")
+	if samlRequestEncoded == "" {
+		// Try POST binding
+		if err := r.ParseForm(); err != nil {
+			return nil, fmt.Errorf("failed to parse form: %w", err)
+		}
+		samlRequestEncoded = r.FormValue("SAMLRequest")
+		if samlRequestEncoded == "" {
+			return nil, fmt.Errorf("missing SAMLRequest parameter")
+		}
+	}
+
+	i.logger.Debug("Parsing SAML LogoutRequest")
+
+	// Decode base64
+	compressedData, err := base64.StdEncoding.DecodeString(samlRequestEncoded)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode SAMLRequest: %w", err)
+	}
+
+	// Try to decompress (HTTP-Redirect binding uses deflate compression)
+	// HTTP-POST binding might not be compressed
+	var data []byte
+	reader := flate.NewReader(bytes.NewReader(compressedData))
+	data, err = io.ReadAll(io.LimitReader(reader, 1024*1024))
+	reader.Close()
+
+	if err != nil {
+		// If decompression fails, try using raw data (POST binding)
+		data = compressedData
+	}
+
+	// Parse XML
+	var logoutRequest saml.LogoutRequest
+	if err := xml.Unmarshal(data, &logoutRequest); err != nil {
+		return nil, fmt.Errorf("failed to parse LogoutRequest XML: %w", err)
+	}
+
+	i.logger.Info("Parsed SAML LogoutRequest",
+		zap.String("request_id", logoutRequest.ID),
+		zap.String("issuer", logoutRequest.Issuer.Value),
+	)
+
+	return &logoutRequest, nil
+}
+
+// CreateLogoutResponse creates a SAML LogoutResponse
+func (i *IdP) CreateLogoutResponse(requestID, statusCode string) ([]byte, error) {
+	now := time.Now()
+	responseID := fmt.Sprintf("_logout_response_%d", now.UnixNano())
+
+	response := &saml.LogoutResponse{
+		ID:           responseID,
+		InResponseTo: requestID,
+		Version:      "2.0",
+		IssueInstant: now,
+		Destination:  i.spACSURL,
+		Issuer: &saml.Issuer{
+			Format: "urn:oasis:names:tc:SAML:2.0:nameid-format:entity",
+			Value:  i.entityID,
+		},
+		Status: saml.Status{
+			StatusCode: saml.StatusCode{
+				Value: statusCode,
+			},
+		},
+	}
+
+	i.logger.Info("Created SAML LogoutResponse",
+		zap.String("response_id", response.ID),
+		zap.String("in_response_to", requestID),
+		zap.String("status", statusCode),
+	)
+
+	// Marshal to XML
+	responseXML, err := xml.MarshalIndent(response, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal LogoutResponse: %w", err)
+	}
+
+	// Add XML header
+	fullXML := []byte(xml.Header + string(responseXML))
+
+	return fullXML, nil
 }

@@ -11,3 +11,12 @@ type SamlRequest struct {
 	CreatedAt  int64  `json:"created_at"`
 	ExpiresAt  int64  `json:"expires_at"`
 }
+
+type Session struct {
+	SessionIndex string `json:"session_index"`
+	NameID       string `json:"name_id"`
+	IDToken      string `json:"id_token"`
+	SpEntityID   string `json:"sp_entity_id"`
+	CreatedAt    int64  `json:"created_at"`
+	ExpiresAt    int64  `json:"expires_at"`
+}

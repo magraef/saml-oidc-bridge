@@ -10,9 +10,13 @@ import (
 
 type Querier interface {
 	CreateSAMLRequest(ctx context.Context, arg CreateSAMLRequestParams) error
+	CreateSession(ctx context.Context, arg CreateSessionParams) error
 	DeleteExpiredRequests(ctx context.Context, expiresAt int64) error
+	DeleteExpiredSessions(ctx context.Context, expiresAt int64) error
 	DeleteSAMLRequest(ctx context.Context, id string) error
+	DeleteSession(ctx context.Context, sessionIndex string) error
 	GetSAMLRequest(ctx context.Context, id string) (SamlRequest, error)
+	GetSession(ctx context.Context, sessionIndex string) (Session, error)
 }
 
 var _ Querier = (*Queries)(nil)
