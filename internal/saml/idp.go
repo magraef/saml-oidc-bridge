@@ -270,6 +270,8 @@ func (i *IdP) signAssertion(assertion *saml.Assertion) (*etree.Element, error) {
 	// Create signing context
 	signingContext := dsig.NewDefaultSigningContext(&keyStore)
 	signingContext.SetSignatureMethod(dsig.RSASHA256SignatureMethod)
+	// Set C14N 1.1 canonicalization to match SP expectations
+	signingContext.Canonicalizer = dsig.MakeC14N11Canonicalizer()
 
 	// Construct the signature element (but don't append it yet)
 	// This creates the complete Signature element with SignedInfo, SignatureValue, KeyInfo
