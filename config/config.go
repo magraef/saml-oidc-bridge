@@ -24,16 +24,28 @@ type OIDCConfig struct {
 	IssuerURL    string   `env:"OIDC_ISSUER_URL"`
 	ClientID     string   `env:"OIDC_CLIENT_ID"`
 	ClientSecret string   `env:"OIDC_CLIENT_SECRET"`
-	RedirectURL  string   `env:"OIDC_REDIRECT_URL"`
 	Scopes       []string `env:"OIDC_SCOPES" envSeparator:"," envDefault:"openid,profile,email"`
+
+	// Derived field (populated from IDP_URL during validation)
+	RedirectURL string
 }
 
 // SAMLConfig contains SAML IdP settings for this proxy
 type SAMLConfig struct {
-	EntityID        string `env:"SAML_ENTITY_ID"`
-	ACSURL          string `env:"SAML_ACS_URL"`
+	// Base URL for the IdP (e.g., https://saml-bridge.example.com)
+	// All SAML endpoints will be derived from this URL:
+	// - Entity ID: IDP_URL
+	// - Metadata: IDP_URL/metadata
+	// - ACS URL: IDP_URL/saml/acs
+	// - Login: IDP_URL/saml/login
+	// - Logout: IDP_URL/saml/logout
+	IDPURL          string `env:"IDP_URL"`
 	CertificatePath string `env:"SAML_CERTIFICATE_PATH"`
 	PrivateKeyPath  string `env:"SAML_PRIVATE_KEY_PATH"`
+
+	// Derived fields (populated from IDP_URL during validation)
+	EntityID string
+	ACSURL   string
 }
 
 // SPConfig contains the Service Provider (application) settings
@@ -167,19 +179,22 @@ func (c *Config) Validate() error {
 	if c.OIDC.ClientSecret == "" {
 		return fmt.Errorf("OIDC_CLIENT_SECRET is required")
 	}
-	if c.OIDC.RedirectURL == "" {
-		return fmt.Errorf("OIDC_REDIRECT_URL is required")
-	}
+
 	if len(c.OIDC.Scopes) == 0 {
 		return fmt.Errorf("OIDC_SCOPES must contain at least one scope")
 	}
 
-	if c.SAML.EntityID == "" {
-		return fmt.Errorf("SAML_ENTITY_ID is required")
+	// IDP_URL is required
+	if c.SAML.IDPURL == "" {
+		return fmt.Errorf("IDP_URL is required")
 	}
-	if c.SAML.ACSURL == "" {
-		return fmt.Errorf("SAML_ACS_URL is required")
-	}
+
+	// Derive OIDC RedirectURL from IDP_URL
+	c.OIDC.RedirectURL = c.SAML.IDPURL + "/oidc/callback"
+
+	// Derive SAML EntityID and ACSURL from IDP_URL
+	c.SAML.EntityID = c.SAML.IDPURL
+	c.SAML.ACSURL = c.SAML.IDPURL + "/saml/acs"
 
 	// If certificate path is provided, private key path must also be provided
 	if c.SAML.CertificatePath != "" && c.SAML.PrivateKeyPath == "" {

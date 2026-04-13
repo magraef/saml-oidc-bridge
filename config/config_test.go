@@ -16,10 +16,8 @@ func TestLoad(t *testing.T) {
 	envContent := `OIDC_ISSUER_URL=https://accounts.google.com
 OIDC_CLIENT_ID=test-client-id
 OIDC_CLIENT_SECRET=test-secret
-OIDC_REDIRECT_URL=https://proxy.example.com/oidc/callback
 OIDC_SCOPES=openid,profile,email
-SAML_ENTITY_ID=https://proxy.example.com/metadata
-SAML_ACS_URL=https://proxy.example.com/saml/login
+IDP_URL=https://proxy.example.com
 SAML_CERTIFICATE_PATH=/certs/tls.crt
 SAML_PRIVATE_KEY_PATH=/certs/tls.key
 SP_ENTITY_ID=https://app.example.com/metadata
@@ -57,10 +55,16 @@ STORAGE_DATABASE_PATH=./test.db
 	if len(cfg.OIDC.Scopes) != 3 {
 		t.Errorf("Expected 3 scopes, got %d", len(cfg.OIDC.Scopes))
 	}
+	if cfg.OIDC.RedirectURL != "https://proxy.example.com/oidc/callback" {
+		t.Errorf("Expected redirect_url derived from IDP_URL, got %s", cfg.OIDC.RedirectURL)
+	}
 
-	// Verify SAML config
-	if cfg.SAML.EntityID != "https://proxy.example.com/metadata" {
-		t.Errorf("Expected entity_id to be https://proxy.example.com/metadata, got %s", cfg.SAML.EntityID)
+	// Verify SAML config (derived from IDP_URL)
+	if cfg.SAML.EntityID != "https://proxy.example.com" {
+		t.Errorf("Expected entity_id to be https://proxy.example.com, got %s", cfg.SAML.EntityID)
+	}
+	if cfg.SAML.ACSURL != "https://proxy.example.com/saml/acs" {
+		t.Errorf("Expected acs_url to be https://proxy.example.com/saml/acs, got %s", cfg.SAML.ACSURL)
 	}
 
 	// Verify mapping
@@ -82,18 +86,16 @@ func TestValidate(t *testing.T) {
 		errMsg  string
 	}{
 		{
-			name: "valid config",
+			name: "valid config with IDP_URL",
 			config: Config{
 				OIDC: OIDCConfig{
 					IssuerURL:    "https://accounts.google.com",
 					ClientID:     "test-client",
 					ClientSecret: "test-secret",
-					RedirectURL:  "https://proxy.example.com/callback",
 					Scopes:       []string{"openid"},
 				},
 				SAML: SAMLConfig{
-					EntityID:        "https://proxy.example.com",
-					ACSURL:          "https://proxy.example.com/saml/login",
+					IDPURL:          "https://proxy.example.com",
 					CertificatePath: "/certs/tls.crt",
 					PrivateKeyPath:  "/certs/tls.key",
 				},
@@ -124,7 +126,7 @@ func TestValidate(t *testing.T) {
 			errMsg:  "OIDC_ISSUER_URL is required",
 		},
 		{
-			name: "missing SAML entity ID",
+			name: "missing IDP_URL",
 			config: Config{
 				OIDC: OIDCConfig{
 					IssuerURL:    "https://accounts.google.com",
@@ -134,13 +136,22 @@ func TestValidate(t *testing.T) {
 					Scopes:       []string{"openid"},
 				},
 				SAML: SAMLConfig{
-					ACSURL:          "https://proxy.example.com/saml/login",
 					CertificatePath: "/certs/tls.crt",
 					PrivateKeyPath:  "/certs/tls.key",
 				},
+				SP: SPConfig{
+					EntityID: "https://app.example.com",
+					ACSURL:   "https://app.example.com/saml/acs",
+				},
+				Mapping: MappingConfig{
+					NameID: "email",
+				},
+				Session: SessionConfig{
+					CookieSecret: "secret",
+				},
 			},
 			wantErr: true,
-			errMsg:  "SAML_ENTITY_ID is required",
+			errMsg:  "IDP_URL is required",
 		},
 	}
 
@@ -163,10 +174,8 @@ func TestLoadFromEnv(t *testing.T) {
 	os.Setenv("OIDC_ISSUER_URL", "https://test.example.com")
 	os.Setenv("OIDC_CLIENT_ID", "env-client-id")
 	os.Setenv("OIDC_CLIENT_SECRET", "env-secret")
-	os.Setenv("OIDC_REDIRECT_URL", "https://test.example.com/callback")
 	os.Setenv("OIDC_SCOPES", "openid,profile,email")
-	os.Setenv("SAML_ENTITY_ID", "https://env-proxy.example.com")
-	os.Setenv("SAML_ACS_URL", "https://env-proxy.example.com/acs")
+	os.Setenv("IDP_URL", "https://env-proxy.example.com")
 	os.Setenv("SAML_CERTIFICATE_PATH", "/tmp/cert.pem")
 	os.Setenv("SAML_PRIVATE_KEY_PATH", "/tmp/key.pem")
 	os.Setenv("SP_ENTITY_ID", "https://sp.example.com")
@@ -180,10 +189,8 @@ func TestLoadFromEnv(t *testing.T) {
 		os.Unsetenv("OIDC_ISSUER_URL")
 		os.Unsetenv("OIDC_CLIENT_ID")
 		os.Unsetenv("OIDC_CLIENT_SECRET")
-		os.Unsetenv("OIDC_REDIRECT_URL")
 		os.Unsetenv("OIDC_SCOPES")
-		os.Unsetenv("SAML_ENTITY_ID")
-		os.Unsetenv("SAML_ACS_URL")
+		os.Unsetenv("IDP_URL")
 		os.Unsetenv("SAML_CERTIFICATE_PATH")
 		os.Unsetenv("SAML_PRIVATE_KEY_PATH")
 		os.Unsetenv("SP_ENTITY_ID")
@@ -211,8 +218,14 @@ func TestLoadFromEnv(t *testing.T) {
 	if len(cfg.OIDC.Scopes) != 3 {
 		t.Errorf("Expected 3 scopes from env, got %d", len(cfg.OIDC.Scopes))
 	}
+	if cfg.OIDC.RedirectURL != "https://env-proxy.example.com/oidc/callback" {
+		t.Errorf("Expected redirect_url derived from IDP_URL, got %s", cfg.OIDC.RedirectURL)
+	}
 	if cfg.SAML.EntityID != "https://env-proxy.example.com" {
-		t.Errorf("Expected entity_id from env, got %s", cfg.SAML.EntityID)
+		t.Errorf("Expected entity_id derived from IDP_URL, got %s", cfg.SAML.EntityID)
+	}
+	if cfg.SAML.ACSURL != "https://env-proxy.example.com/saml/acs" {
+		t.Errorf("Expected acs_url derived from IDP_URL, got %s", cfg.SAML.ACSURL)
 	}
 	if cfg.Session.CookieSecure != false {
 		t.Errorf("Expected cookie_secure to be false from env")
@@ -233,9 +246,7 @@ func TestLoadDefaults(t *testing.T) {
 	os.Setenv("OIDC_ISSUER_URL", "https://test.example.com")
 	os.Setenv("OIDC_CLIENT_ID", "test-client")
 	os.Setenv("OIDC_CLIENT_SECRET", "test-secret")
-	os.Setenv("OIDC_REDIRECT_URL", "https://test.example.com/callback")
-	os.Setenv("SAML_ENTITY_ID", "https://saml.example.com")
-	os.Setenv("SAML_ACS_URL", "https://saml.example.com/acs")
+	os.Setenv("IDP_URL", "https://saml.example.com")
 	os.Setenv("SAML_CERTIFICATE_PATH", "/tmp/cert.pem")
 	os.Setenv("SAML_PRIVATE_KEY_PATH", "/tmp/key.pem")
 	os.Setenv("SP_ENTITY_ID", "https://sp.example.com")
@@ -246,9 +257,7 @@ func TestLoadDefaults(t *testing.T) {
 		os.Unsetenv("OIDC_ISSUER_URL")
 		os.Unsetenv("OIDC_CLIENT_ID")
 		os.Unsetenv("OIDC_CLIENT_SECRET")
-		os.Unsetenv("OIDC_REDIRECT_URL")
-		os.Unsetenv("SAML_ENTITY_ID")
-		os.Unsetenv("SAML_ACS_URL")
+		os.Unsetenv("IDP_URL")
 		os.Unsetenv("SAML_CERTIFICATE_PATH")
 		os.Unsetenv("SAML_PRIVATE_KEY_PATH")
 		os.Unsetenv("SP_ENTITY_ID")
@@ -294,9 +303,7 @@ func TestEnvFileOverride(t *testing.T) {
 	envContent := `OIDC_ISSUER_URL=https://file.example.com
 OIDC_CLIENT_ID=file-client-id
 OIDC_CLIENT_SECRET=file-secret
-OIDC_REDIRECT_URL=https://file.example.com/callback
-SAML_ENTITY_ID=https://file-saml.example.com
-SAML_ACS_URL=https://file-saml.example.com/acs
+IDP_URL=https://file-saml.example.com
 SAML_CERTIFICATE_PATH=/tmp/cert.pem
 SAML_PRIVATE_KEY_PATH=/tmp/key.pem
 SP_ENTITY_ID=https://file-sp.example.com
