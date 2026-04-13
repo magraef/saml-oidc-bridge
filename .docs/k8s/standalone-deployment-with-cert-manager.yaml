@@ -1,0 +1,277 @@
+# Production-Ready Standalone Deployment with cert-manager
+#
+# This example shows a production-ready deployment with automatic TLS certificate
+# management via cert-manager, explicit environment variables, and ingress configuration.
+#
+# Prerequisites:
+# 1. cert-manager installed: kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.14.0/cert-manager.yaml
+# 2. ClusterIssuer configured (see below)
+# 3. Ingress controller installed (nginx)
+# 4. Create secrets with your credentials
+#
+# Create secrets:
+# kubectl create secret generic saml-oidc-bridge-oidc \
+#   --from-literal=client-secret=your-oidc-client-secret \
+#   -n saml-oidc-bridge
+#
+# kubectl create secret generic saml-oidc-bridge-session \
+#   --from-literal=cookie-secret=$(openssl rand -base64 32) \
+#   --from-literal=encryption-key=$(openssl rand -hex 32) \
+#   -n saml-oidc-bridge
+#
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: saml-oidc-bridge
+  labels:
+    name: saml-oidc-bridge
+---
+# Certificate for SAML signing (managed by cert-manager)
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: saml-signing-cert
+  namespace: saml-oidc-bridge
+spec:
+  secretName: saml-oidc-bridge-tls
+  issuerRef:
+    name: letsencrypt-prod
+    kind: ClusterIssuer
+  dnsNames:
+    - saml-bridge.example.com
+  usages:
+    - digital signature
+    - key encipherment
+    - server auth
+  duration: 2160h # 90 days
+  renewBefore: 720h # 30 days
+---
+# Secret for OIDC credentials
+apiVersion: v1
+kind: Secret
+metadata:
+  name: saml-oidc-bridge-oidc
+  namespace: saml-oidc-bridge
+type: Opaque
+stringData:
+  client-secret: "your-oidc-client-secret-here"
+---
+# Secret for session and encryption
+apiVersion: v1
+kind: Secret
+metadata:
+  name: saml-oidc-bridge-session
+  namespace: saml-oidc-bridge
+type: Opaque
+stringData:
+  # Generate with: openssl rand -base64 32
+  cookie-secret: "your-random-session-secret-32-bytes-minimum"
+  # Generate with: openssl rand -hex 32
+  encryption-key: "your-64-character-hex-encryption-key-for-aes256"
+---
+# Persistent storage for SQLite database
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: saml-oidc-bridge-data
+  namespace: saml-oidc-bridge
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: saml-oidc-bridge
+  namespace: saml-oidc-bridge
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: saml-oidc-bridge
+  namespace: saml-oidc-bridge
+  labels:
+    app: saml-oidc-bridge
+    version: v1
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: saml-oidc-bridge
+  template:
+    metadata:
+      labels:
+        app: saml-oidc-bridge
+        version: v1
+    spec:
+      volumes:
+      - name: data
+        persistentVolumeClaim:
+          claimName: saml-oidc-bridge-data
+      - name: certs
+        secret:
+          secretName: saml-oidc-bridge-tls
+          items:
+          - key: tls.crt
+            path: tls.crt
+          - key: tls.key
+            path: tls.key
+      
+      containers:
+      - name: saml-oidc-bridge
+        image: ghcr.io/magraef/saml-oidc-bridge:latest
+        imagePullPolicy: Always
+        
+        ports:
+        - containerPort: 8080
+          name: http
+          protocol: TCP
+        
+        env:
+        # OIDC Provider Configuration
+        - name: OIDC_ISSUER_URL
+          value: "https://accounts.google.com"
+        - name: OIDC_CLIENT_ID
+          value: "your-client-id.apps.googleusercontent.com"
+        - name: OIDC_SCOPES
+          value: "openid,profile,email"
+        
+        # OIDC Client Secret (from secret)
+        - name: OIDC_CLIENT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: saml-oidc-bridge-oidc
+              key: client-secret
+        
+        # Bridge Base URL (all endpoints derived from this)
+        - name: IDP_URL
+          value: "https://saml-bridge.example.com"
+        
+        # Service Provider Configuration
+        - name: SP_ENTITY_ID
+          value: "https://your-app.example.com/saml/metadata"
+        - name: SP_ACS_URL
+          value: "https://your-app.example.com/saml/acs"
+        
+        # Attribute Mapping
+        - name: MAPPING_NAME_ID
+          value: "email"
+        - name: MAPPING_ATTR_EMAIL
+          value: "email"
+        - name: MAPPING_ATTR_USERNAME
+          value: "preferred_username"
+        - name: MAPPING_ATTR_DISPLAYNAME
+          value: "name"
+        - name: MAPPING_ATTR_FIRSTNAME
+          value: "given_name"
+        - name: MAPPING_ATTR_LASTNAME
+          value: "family_name"
+        
+        # Session Configuration (secrets from secret)
+        - name: SESSION_COOKIE_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: saml-oidc-bridge-session
+              key: cookie-secret
+        - name: SESSION_COOKIE_SECURE
+          value: "true"
+        - name: SESSION_COOKIE_NAME
+          value: "saml-oidc-bridge-session"
+        
+        # Storage Configuration
+        - name: STORAGE_DATABASE_PATH
+          value: "/data/saml-oidc-bridge.db"
+        - name: STORAGE_ENCRYPTION_KEY
+          valueFrom:
+            secretKeyRef:
+              name: saml-oidc-bridge-session
+              key: encryption-key
+        
+        # SAML Certificate Configuration (from cert-manager)
+        - name: SAML_CERTIFICATE_PATH
+          value: "/certs/tls.crt"
+        - name: SAML_PRIVATE_KEY_PATH
+          value: "/certs/tls.key"
+        
+        # Server Configuration
+        - name: SERVER_ADDRESS
+          value: ":8080"
+        - name: DEBUG
+          value: "false"
+        
+        volumeMounts:
+        - name: data
+          mountPath: /data
+        - name: certs
+          mountPath: /certs
+          readOnly: true
+        
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "200m"
+          limits:
+            memory: "512Mi"
+            cpu: "1000m"
+        
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8080
+            scheme: HTTP
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: 8080
+            scheme: HTTP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: saml-oidc-bridge
+  namespace: saml-oidc-bridge
+  labels:
+    app: saml-oidc-bridge
+spec:
+  type: ClusterIP
+  sessionAffinity: ClientIP
+  sessionAffinityConfig:
+    clientIP:
+      timeoutSeconds: 600
+  ports:
+  - port: 80
+    targetPort: 8080
+    protocol: TCP
+    name: http
+  selector:
+    app: saml-oidc-bridge
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: saml-oidc-bridge
+  namespace: saml-oidc-bridge
+  annotations:
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+spec:
+  ingressClassName: <ingress-class-name>
+  tls:
+  - hosts:
+    - saml-bridge.example.com
+    secretName: saml-bridge-ingress-tls
+  rules:
+  - host: saml-bridge.example.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: saml-oidc-bridge
+            port:
+              number: 80
